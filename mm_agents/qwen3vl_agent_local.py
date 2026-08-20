@@ -628,7 +628,68 @@ Previous actions:
         other["code"] = pyautogui_code
         return low_level_instruction, pyautogui_code, other
 
+    # ---- LLM I/O dump -------------------------------------------------
+    # Set OSWORLD_DUMP_LLM_IO=1 to record every request/response under
+    #   <example_result_dir>/llm_io/
+    #     call_001.json   full request (system prompt + all messages) + response
+    #     img_<sha>.png   every image actually sent, de-duplicated by content
+    # Images inside the JSON are replaced by "<image file=... >" markers so the
+    # JSON stays readable and the folder stays small enough to commit.
+
+    def _dump_sanitize(self, obj, out_dir):
+        import hashlib
+        if isinstance(obj, dict):
+            return {k: self._dump_sanitize(v, out_dir) for k, v in obj.items()}
+        if isinstance(obj, list):
+            return [self._dump_sanitize(v, out_dir) for v in obj]
+        if isinstance(obj, str) and obj.startswith("data:image"):
+            try:
+                head, b64 = obj.split(",", 1)
+                raw = base64.b64decode(b64)
+                h = hashlib.sha1(raw).hexdigest()[:10]
+                ext = "png" if "png" in head else "jpg"
+                name = "img_%s.%s" % (h, ext)
+                fp = os.path.join(out_dir, name)
+                if not os.path.exists(fp):
+                    with open(fp, "wb") as f:
+                        f.write(raw)
+                return "<image file=%s bytes=%d>" % (name, len(raw))
+            except Exception:
+                return "<image undecodable>"
+        return obj
+
     def call_llm(self, payload: Dict[str, Any], model: str) -> str:
+        if os.environ.get("OSWORLD_DUMP_LLM_IO") != "1":
+            return self._call_llm_inner(payload, model)
+        out_dir, idx, req = None, 0, None
+        try:
+            out_dir = os.path.join(self.example_result_dir, "llm_io")
+            os.makedirs(out_dir, exist_ok=True)
+            idx = getattr(self, "_llm_call_idx", 0) + 1
+            self._llm_call_idx = idx
+            req = self._dump_sanitize(dict(payload), out_dir)
+        except Exception as e:
+            logger.warning("llm_io: prepare failed: %s", e)
+            out_dir = None
+        t0 = time.time()
+        resp = self._call_llm_inner(payload, model)
+        if out_dir:
+            try:
+                rec = {
+                    "call_index": idx,
+                    "model": model,
+                    "elapsed_sec": round(time.time() - t0, 2),
+                    "request": req,
+                    "response": resp,
+                }
+                with open(os.path.join(out_dir, "call_%03d.json" % idx), "w",
+                          encoding="utf-8") as f:
+                    json.dump(rec, f, ensure_ascii=False, indent=2)
+            except Exception as e:
+                logger.warning("llm_io: dump failed: %s", e)
+        return resp
+
+    def _call_llm_inner(self, payload: Dict[str, Any], model: str) -> str:
 
         headers = {
             "Content-Type": "application/json",
