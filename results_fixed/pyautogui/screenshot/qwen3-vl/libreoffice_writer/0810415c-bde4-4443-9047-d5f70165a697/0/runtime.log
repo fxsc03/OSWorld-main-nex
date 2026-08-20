@@ -1,0 +1,80 @@
+========================== qwen3-vl ===================================
+Instruction:
+Make the line spacing of first two paragraph into double line spacing
+call_llm bases=['http://127.0.0.1:8000', 'http://127.0.0.1:8001'] (eps='http://127.0.0.1:8000,http://127.0.0.1:8001', ep=None)
+Qwen3VL Output:
+Action: Click and hold at the beginning of the first paragraph, then drag downward to the end of the second paragraph to select both paragraphs.
+<tool_call>
+{"name": "computer_use", "arguments": {"action": "mouse_move", "coordinate": [343, 252]}}
+</tool_call>
+<tool_call>
+{"name": "computer_use", "arguments": {"action": "left_click_drag", "coordinate": [526, 380]}}
+</tool_call>
+Low level instruction: Click and hold at the beginning of the first paragraph, then drag downward to the end of the second paragraph to select both paragraphs.
+Pyautogui actions: ['pyautogui.moveTo(659, 272)', 'pyautogui.dragTo(1010, 410, duration=0.5)']
+========================== qwen3-vl ===================================
+Instruction:
+Make the line spacing of first two paragraph into double line spacing
+call_llm bases=['http://127.0.0.1:8000', 'http://127.0.0.1:8001'] (eps='http://127.0.0.1:8000,http://127.0.0.1:8001', ep=None)
+Qwen3VL Output:
+Action: Click on the 'Format' menu in the top menu bar of LibreOffice Writer.
+<tool_call>
+{"name": "computer_use", "arguments": {"action": "left_click", "coordinate": [192, 132]}}
+</tool_call>
+Low level instruction: Click on the 'Format' menu in the top menu bar of LibreOffice Writer.
+Pyautogui actions: ['pyautogui.click(369, 142)']
+========================== qwen3-vl ===================================
+Instruction:
+Make the line spacing of first two paragraph into double line spacing
+call_llm bases=['http://127.0.0.1:8000', 'http://127.0.0.1:8001'] (eps='http://127.0.0.1:8000,http://127.0.0.1:8001', ep=None)
+Qwen3VL Output:
+Action: Click on the 'Paragraph...' option in the dropdown menu under 'Format' to open the paragraph formatting dialog.
+<tool_call>
+{"name": "computer_use", "arguments": {"action": "left_click", "coordinate": [157, 381]}}
+</tool_call>
+Low level instruction: Click on the 'Paragraph...' option in the dropdown menu under 'Format' to open the paragraph formatting dialog.
+Pyautogui actions: ['pyautogui.click(301, 411)']
+========================== qwen3-vl ===================================
+Instruction:
+Make the line spacing of first two paragraph into double line spacing
+call_llm bases=['http://127.0.0.1:8000', 'http://127.0.0.1:8001'] (eps='http://127.0.0.1:8000,http://127.0.0.1:8001', ep=None)
+Qwen3VL Output:
+Action: Click on the 'Line Spacing' dropdown menu in the 'Paragraph' dialog box to view available spacing options.
+<tool_call>
+{"name": "computer_use", "arguments": {"action": "left_click", "coordinate": [547, 452]}}
+</tool_call>
+Low level instruction: Click on the 'Line Spacing' dropdown menu in the 'Paragraph' dialog box to view available spacing options.
+Pyautogui actions: ['pyautogui.click(1051, 488)']
+========================== qwen3-vl ===================================
+Instruction:
+Make the line spacing of first two paragraph into double line spacing
+call_llm bases=['http://127.0.0.1:8000', 'http://127.0.0.1:8001'] (eps='http://127.0.0.1:8000,http://127.0.0.1:8001', ep=None)
+Qwen3VL Output:
+Action: Click on the 'Double' option in the 'Line Spacing' dropdown menu within the 'Paragraph' dialog box.
+<tool_call>
+{"name": "computer_use", "arguments": {"action": "left_click", "coordinate": [562, 521]}}
+</tool_call>
+Low level instruction: Click on the 'Double' option in the 'Line Spacing' dropdown menu within the 'Paragraph' dialog box.
+Pyautogui actions: ['pyautogui.click(1080, 563)']
+========================== qwen3-vl ===================================
+Instruction:
+Make the line spacing of first two paragraph into double line spacing
+call_llm bases=['http://127.0.0.1:8000', 'http://127.0.0.1:8001'] (eps='http://127.0.0.1:8000,http://127.0.0.1:8001', ep=None)
+Qwen3VL Output:
+Action: Click the 'OK' button in the 'Paragraph' dialog box to apply the double line spacing to the selected paragraphs.
+<tool_call>
+{"name": "computer_use", "arguments": {"action": "left_click", "coordinate": [632, 652]}}
+</tool_call>
+Low level instruction: Click the 'OK' button in the 'Paragraph' dialog box to apply the double line spacing to the selected paragraphs.
+Pyautogui actions: ['pyautogui.click(1214, 704)']
+========================== qwen3-vl ===================================
+Instruction:
+Make the line spacing of first two paragraph into double line spacing
+call_llm bases=['http://127.0.0.1:8000', 'http://127.0.0.1:8001'] (eps='http://127.0.0.1:8000,http://127.0.0.1:8001', ep=None)
+Qwen3VL Output:
+Action: Click on the 'Format' menu in the top menu bar of LibreOffice Writer.
+<tool_call>
+{"name": "computer_use", "arguments": {"action": "left_click", "coordinate": [115, 76]}}
+</tool_call>
+Low level instruction: Click on the 'Format' menu in the top menu bar of LibreOffice Writer.
+Pyautogui actions: ['pyautogui.click(221, 82)']
