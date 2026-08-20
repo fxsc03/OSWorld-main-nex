@@ -1,0 +1,18 @@
+{
+ "gimp": [
+  "7a4deb26-d57d-4ea9-9a73-630f66a7b568"
+ ],
+ "libreoffice_calc": [
+  "357ef137-7eeb-4c80-a3bb-0951f26a8aff",
+  "a01fbce3-2793-461f-ab86-43680ccbae25"
+ ],
+ "libreoffice_impress": [
+  "af2d657a-e6b3-4c6a-9f67-9e3ed015974c"
+ ],
+ "libreoffice_writer": [
+  "0b17a146-2934-46c7-8727-73ff6b6483e8"
+ ],
+ "vlc": [
+  "8ba5ae7a-5ae5-4eab-9fcc-5dd4fe3abf89"
+ ]
+}

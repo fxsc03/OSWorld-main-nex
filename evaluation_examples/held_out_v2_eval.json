@@ -1,0 +1,66 @@
+{
+  "gimp": [
+    "8ea73f6f-9689-42ad-8c60-195bbf06a7ba",
+    "a746add2-cab0-4740-ac36-c3769d9bfb46",
+    "7b7617bd-57cc-468e-9c91-40c4ec2bcb3d",
+    "7a4deb26-d57d-4ea9-9a73-630f66a7b568",
+    "f4aec372-4fb0-4df5-a52b-79e0e2a5d6ce",
+    "62f7fd55-0687-4a43-b6e1-3eda16fc6252"
+  ],
+  "libreoffice_calc": [
+    "4de54231-e4b5-49e3-b2ba-61a0bec721c0",
+    "0bf05a7d-b28b-44d2-955a-50b41e24012a",
+    "535364ea-05bd-46ea-9937-9f55c68507e8",
+    "3a7c8185-25c1-4941-bd7b-96e823c9f21f",
+    "1de60575-bb6e-4c3d-9e6a-2fa699f9f197",
+    "a01fbce3-2793-461f-ab86-43680ccbae25",
+    "7e429b8d-a3f0-4ed0-9b58-08957d00b127",
+    "357ef137-7eeb-4c80-a3bb-0951f26a8aff",
+    "26a8440e-c166-4c50-aef4-bfb77314b46b",
+    "21df9241-f8d7-4509-b7f1-37e501a823f7"
+  ],
+  "libreoffice_impress": [
+    "358aa0a7-6677-453f-ae35-e440f004c31e",
+    "af2d657a-e6b3-4c6a-9f67-9e3ed015974c",
+    "a097acff-6266-4291-9fbd-137af7ecd439",
+    "7ae48c60-f143-4119-b659-15b8f485eb9a",
+    "c59742c0-4323-4b9d-8a02-723c251deaa0",
+    "5c1a6c3d-c1b3-47cb-9b01-8d1b7544ffa1",
+    "e4ef0baf-4b52-4590-a47e-d4d464cca2d7",
+    "73c99fb9-f828-43ce-b87a-01dc07faa224",
+    "4ed5abd0-8b5d-47bd-839f-cacfa15ca37a",
+    "ac9bb6cb-1888-43ab-81e4-a98a547918cd"
+  ],
+  "libreoffice_writer": [
+    "0a0faba3-5580-44df-965d-f562a99b291c",
+    "0b17a146-2934-46c7-8727-73ff6b6483e8",
+    "adf5e2c3-64c7-4644-b7b6-d2f0167927e7",
+    "b21acd93-60fd-4127-8a43-2f5178f4a830",
+    "0e763496-b6bb-4508-a427-fad0b6c3e195"
+  ],
+  "os": [
+    "3ce045a0-877b-42aa-8d2c-b4a863336ab8",
+    "37887e8c-da15-4192-923c-08fa390a176d",
+    "b6781586-6346-41cd-935a-a6b1487918fc",
+    "4783cc41-c03c-4e1b-89b4-50658f642bd5",
+    "4127319a-8b79-4410-b58a-7a151e15f3d7"
+  ],
+  "thunderbird": [
+    "d38192b0-17dc-4e1d-99c3-786d0117de77",
+    "7b1e1ff9-bb85-49be-b01d-d6424be18cd0",
+    "10a730d5-d414-4b40-b479-684bed1ae522"
+  ],
+  "vlc": [
+    "a5bbbcd5-b398-4c91-83d4-55e1e31bbb81",
+    "8ba5ae7a-5ae5-4eab-9fcc-5dd4fe3abf89",
+    "8f080098-ddb1-424c-b438-4e96e5e4786e",
+    "aa4b5023-aef6-4ed9-bdc9-705f59ab9ad6"
+  ],
+  "vs_code": [
+    "847a96b6-df94-4927-97e6-8cc9ea66ced7",
+    "c6bf789c-ba3a-4209-971d-b63abf0ab733",
+    "ec71221e-ac43-46f9-89b8-ee7d80f7e1c5",
+    "70745df8-f2f5-42bd-8074-fbc10334fcc5",
+    "5e2d93d8-8ad0-4435-b150-1692aacaa994"
+  ]
+}

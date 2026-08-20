@@ -1,0 +1,31 @@
+{
+  "libreoffice_calc": [
+    "357ef137-7eeb-4c80-a3bb-0951f26a8aff",
+    "42e0a640-4f19-4b28-973d-729602b5a4a7",
+    "12382c62-0cd1-4bf2-bdc8-1d20bf9b2371",
+    "f9584479-3d0d-4c79-affa-9ad7afdd8850",
+    "7e429b8d-a3f0-4ed0-9b58-08957d00b127",
+    "37608790-6147-45d0-9f20-1137bb35703d",
+    "26a8440e-c166-4c50-aef4-bfb77314b46b",
+    "035f41ba-6653-43ab-aa63-c86d449d62e5",
+    "01b269ae-2111-4a07-81fd-3fcd711993b0"
+  ],
+  "libreoffice_impress": [
+    "550ce7e7-747b-495f-b122-acdc4d0b8e54",
+    "455d3c66-7dc6-4537-a39a-36d3e9119df7",
+    "ef9d12bd-bcee-4ba0-a40e-918400f43ddf",
+    "ac9bb6cb-1888-43ab-81e4-a98a547918cd",
+    "2cd43775-7085-45d8-89fa-9e35c0a915cf",
+    "08aced46-45a2-48d7-993b-ed3fb5b32302",
+    "f23acfd2-c485-4b7c-a1e7-d4303ddfe864",
+    "a53f80cd-4a90-4490-8310-097b011433f6",
+    "7ae48c60-f143-4119-b659-15b8f485eb9a"
+  ],
+  "libreoffice_writer": [
+    "0810415c-bde4-4443-9047-d5f70165a697",
+    "4bcb1253-a636-4df4-8cb0-a35c04dfef31",
+    "d53ff5ee-3b1a-431e-b2be-30ed2673079b",
+    "ecc2413d-8a48-416e-a3a2-d30106ca36cb",
+    "bb8ccc78-479f-4a2f-a71e-d565e439436b"
+  ]
+}

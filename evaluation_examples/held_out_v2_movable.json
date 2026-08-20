@@ -1,0 +1,34 @@
+{
+  "gimp": [
+    "8ea73f6f-9689-42ad-8c60-195bbf06a7ba",
+    "a746add2-cab0-4740-ac36-c3769d9bfb46",
+    "7b7617bd-57cc-468e-9c91-40c4ec2bcb3d",
+    "7a4deb26-d57d-4ea9-9a73-630f66a7b568"
+  ],
+  "libreoffice_calc": [
+    "357ef137-7eeb-4c80-a3bb-0951f26a8aff"
+  ],
+  "libreoffice_impress": [
+    "af2d657a-e6b3-4c6a-9f67-9e3ed015974c",
+    "a097acff-6266-4291-9fbd-137af7ecd439",
+    "5c1a6c3d-c1b3-47cb-9b01-8d1b7544ffa1",
+    "73c99fb9-f828-43ce-b87a-01dc07faa224"
+  ],
+  "libreoffice_writer": [
+    "0b17a146-2934-46c7-8727-73ff6b6483e8",
+    "0e763496-b6bb-4508-a427-fad0b6c3e195"
+  ],
+  "os": [
+    "3ce045a0-877b-42aa-8d2c-b4a863336ab8",
+    "b6781586-6346-41cd-935a-a6b1487918fc",
+    "4783cc41-c03c-4e1b-89b4-50658f642bd5"
+  ],
+  "vlc": [
+    "8f080098-ddb1-424c-b438-4e96e5e4786e"
+  ],
+  "vs_code": [
+    "c6bf789c-ba3a-4209-971d-b63abf0ab733",
+    "70745df8-f2f5-42bd-8074-fbc10334fcc5",
+    "5e2d93d8-8ad0-4435-b150-1692aacaa994"
+  ]
+}
