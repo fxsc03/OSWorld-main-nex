@@ -206,3 +206,5 @@ draft/
 manual_examine.py
 run_human_examine.sh
 quick_start.py
+_to_delete/
+*.py.bak

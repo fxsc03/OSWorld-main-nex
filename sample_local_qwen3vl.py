@@ -97,7 +97,7 @@ def config() -> argparse.Namespace:
         "--provider_name",
         type=str,
         default="volcengine",
-        choices=["volcengine"],
+        choices=["volcengine", "nex", "docker"],
         help="Provider name",
     )
     parser.add_argument("--client_password", type=str, default="", help="Client password")

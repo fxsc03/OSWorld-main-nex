@@ -319,6 +319,10 @@ class DesktopEnv(gym.Env):
         # because _get_obs calls get_mcp_tool_list which imports OsworldMcpClient
         # in the VM — and that import fails with NameError if the QCOW's
         # osworld_mcp_client.py is still a 0-byte stub.
+        # Close the gnome-session-failed error window before the first
+        # _get_obs, otherwise the agent's screenshot is the error page.
+        self._dismiss_session_failed()
+
         try:
             self._ensure_mcp_server()
         except Exception as e:
@@ -675,6 +679,56 @@ except Exception:
             max_wait, log_output[:800],
         )
         return False
+
+    _GUEST_DISMISS_SESSION_FAILED = """
+import os, subprocess, time
+os.environ.setdefault("DISPLAY", ":0")
+closed = []
+try:
+    out = subprocess.run(["wmctrl", "-lx"], capture_output=True, text=True, timeout=15).stdout
+except Exception:
+    out = ""
+for line in out.splitlines():
+    parts = line.split(None, 4)
+    if len(parts) >= 3 and "session-failed" in parts[2].lower():
+        subprocess.run(["wmctrl", "-i", "-c", parts[0]], timeout=10)
+        closed.append(parts[0])
+if closed:
+    time.sleep(1.5)
+    try:
+        o2 = subprocess.run(["wmctrl", "-l"], capture_output=True, text=True, timeout=15).stdout
+        ids = [l.split()[0] for l in o2.splitlines() if len(l.split()) > 1 and l.split()[1] != "-1"]
+        if ids:
+            subprocess.run(["wmctrl", "-i", "-a", ids[-1]], timeout=10)
+            time.sleep(0.5)
+            subprocess.run(["wmctrl", "-r", ":ACTIVE:", "-b", "add,maximized_vert,maximized_horz"], timeout=10)
+    except Exception:
+        pass
+print("closed_session_failed=" + ",".join(closed) if closed else "no_session_failed_window")
+"""
+
+    def _dismiss_session_failed(self):
+        """Close GNOME's fullscreen "Oh no! Something has gone wrong" window.
+
+        Containerised images (nex / docker) do not run systemd, so the GNOME
+        session frequently ends up in the gnome-session-failed state. That puts
+        a fullscreen + above + sticky error window on top of everything:
+          - screenshots show the white error page (or the Shell overview),
+            never the target application
+          - every agent click is swallowed by it, the screen never changes and
+            the agent loops on the same action until max_steps runs out
+        We find it by WM_CLASS, close it, then re-activate and maximise the
+        remaining application window.
+        Set OSWORLD_KEEP_SESSION_FAILED=1 to skip (for A/B experiments).
+        """
+        if os.environ.get("OSWORLD_KEEP_SESSION_FAILED"):
+            return
+        try:
+            out = self.controller.execute_python_command(
+                self._GUEST_DISMISS_SESSION_FAILED).get("output", "").strip()
+            logger.info("_dismiss_session_failed: %s", out)
+        except Exception as e:
+            logger.warning("_dismiss_session_failed failed: %s", e)
 
     def _ensure_mcp_server(self):
         """Check if MCP server is listening on port 9292; restart if not."""

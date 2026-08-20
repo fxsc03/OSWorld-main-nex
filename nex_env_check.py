@@ -45,5 +45,6 @@ if fail:
     print(f"X {fail} 项不通过。修复: uv pip install 'scipy<1.18' 'librosa<1.0' 'tifffile<2026.4'")
     sys.exit(1)
 print("V 环境就绪。下一步:")
-print("  export NEX_API_KEY=ak-你的真实key NEX_TEMPLATE=osworld-guest NEX_WORKSPACE_ID=workspace-jsxflfg9")
+print("  export NEX_API_KEY=<把这里换成你的 ak-xxxx 真实 key，别整行复制>")
+print("  export NEX_TEMPLATE=osworld-guest NEX_WORKSPACE_ID=workspace-jsxflfg9")
 print("  python nex_task_smoke.py")
