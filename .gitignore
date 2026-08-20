@@ -208,3 +208,15 @@ run_human_examine.sh
 quick_start.py
 _to_delete/
 *.py.bak
+
+## OSWorld 评测产出(run_full_eval.py --> runs/<时间戳>_<机器名>/)
+## 原则:统计类小文件进 git,截图/轨迹等大文件只留在云盘。
+runs/**
+!runs/
+!runs/INDEX.md
+!runs/*/
+!runs/*/run_meta.json
+!runs/*/perf_stats.json
+!runs/*/perf/
+!runs/*/perf/*.jsonl
+!runs/.gitkeep

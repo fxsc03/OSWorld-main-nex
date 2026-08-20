@@ -20,11 +20,16 @@ import argparse
 import functools
 import json
 import os
+import socket
 import statistics
 import subprocess
 import sys
 import time
 from collections import defaultdict
+
+# 所有产出一律锚定到本文件所在目录(=仓库根),不受 cwd 影响。
+# 仓库放在云盘上时,换机器后 runs/ 里的历史数据自动跟着走。
+REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 # ─────────────────────────────────────────────────────────────────────
 # 参数
@@ -32,7 +37,12 @@ from collections import defaultdict
 def parse_args():
     p = argparse.ArgumentParser(description="OSWorld 全量评测 + 性能埋点")
     p.add_argument("--task_set", default="evaluation_examples/test_all.json")
-    p.add_argument("--result_dir", default="./results_full")
+    p.add_argument("--result_dir", default=None,
+                   help="显式指定输出目录;不给则用 <仓库>/runs/<UTC时间戳>_<机器名>/")
+    p.add_argument("--runs_root", default=None,
+                   help="run 目录的父目录,默认 <仓库>/runs")
+    p.add_argument("--run_name", default=None,
+                   help="本次 run 的目录名,默认 <UTC时间戳>_<机器名>")
     p.add_argument("--model", default="qwen3-vl")
     p.add_argument("--num_envs", type=int, default=2)
 
@@ -53,8 +63,11 @@ def parse_args():
     p.add_argument("--sleep_after_execution", type=float, default=5.0,
                    help="它默认 0.0;动作后 UI 未重绘就截图会系统性失分,复现实验勿调小")
 
+    p.add_argument("--no_dump_llm_io", action="store_true",
+                   help="关掉模型输入输出留档(默认开,写到每个任务目录的 llm_io/)")
     p.add_argument("--skip_preflight", action="store_true")
-    p.add_argument("--report_only", action="store_true", help="只聚合已有事件出报告")
+    p.add_argument("--report_only", action="store_true",
+                   help="只聚合已有事件出报告;不指定 --result_dir 时自动取最近一次 run")
     return p.parse_args()
 
 
@@ -386,19 +399,139 @@ def report(result_dir):
 
 
 # ─────────────────────────────────────────────────────────────────────
+def _sh(cmd):
+    try:
+        return subprocess.run(cmd, shell=True, capture_output=True,
+                              text=True, timeout=15).stdout.strip()
+    except Exception:
+        return ""
+
+
+def _latest_run(runs_root):
+    """report_only 不给目录时,挑最近一次有埋点的 run。"""
+    if not os.path.isdir(runs_root):
+        return None
+    cands = [os.path.join(runs_root, d) for d in os.listdir(runs_root)]
+    cands = [c for c in cands if os.path.isdir(os.path.join(c, "perf"))]
+    return max(cands, key=os.path.getmtime) if cands else None
+
+
+def write_run_meta(run_dir, args, task_set_path):
+    """记下这一轮是在哪台机器、哪个 commit、什么参数下跑的。
+
+    刻意不记 NEX_API_KEY —— run_meta.json 是要进 git 的。
+    """
+    n_tasks = None
+    try:
+        m = json.load(open(task_set_path, encoding="utf-8"))
+        n_tasks = sum(len(v) for v in m.values()) if isinstance(m, dict) else len(m)
+    except Exception:
+        pass
+    info = {
+        "run_name": os.path.basename(run_dir.rstrip("/")),
+        "started_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "hostname": socket.gethostname(),
+        "repo_root": REPO_ROOT,
+        "git_commit": _sh("git -C '%s' rev-parse HEAD" % REPO_ROOT),
+        "git_dirty": bool(_sh("git -C '%s' status --porcelain" % REPO_ROOT)),
+        "python": sys.version.split()[0],
+        "gpus": [l for l in _sh("nvidia-smi -L").splitlines() if l.strip()],
+        "endpoints": [e.strip() for e in
+                      os.environ.get("QWEN3VL_LOCAL_ENDPOINTS", "").split(",") if e.strip()],
+        "nex_workspace": os.environ.get("NEX_WORKSPACE_ID"),
+        "nex_template": os.environ.get("NEX_TEMPLATE"),
+        "task_set": task_set_path,
+        "task_count": n_tasks,
+        "dump_llm_io": os.environ.get("OSWORLD_DUMP_LLM_IO") == "1",
+        "args": dict(vars(args)),
+    }
+    with open(os.path.join(run_dir, "run_meta.json"), "w", encoding="utf-8") as f:
+        json.dump(info, f, ensure_ascii=False, indent=2)
+    return info
+
+
+_INDEX_HEADER = (
+    "# 历次 run 索引\n\n"
+    "换机器后这张表跟着云盘一起走,用来横向对比不同机器 / 不同参数下的耗时和成功率。\n"
+    "每行对应 `runs/<目录>/`,里面有 `perf_stats.json`(统计)、`perf/`(原始埋点)、\n"
+    "以及各任务目录下的 `llm_io/`(模型输入输出)。\n\n"
+    "| run | 机器 | 开始(UTC) | 任务数 | 并发 | max_steps | 成功率 | 墙钟(h) | 单任务均值(s) | git |\n"
+    "|---|---|---|---|---|---|---|---|---|---|\n"
+)
+
+
+def append_index(runs_root, run_dir, meta):
+    st = {}
+    sp = os.path.join(run_dir, "perf_stats.json")
+    if os.path.exists(sp):
+        try:
+            st = json.load(open(sp, encoding="utf-8"))
+        except Exception:
+            pass
+    idx = os.path.join(runs_root, "INDEX.md")
+    fresh = not os.path.exists(idx)
+    n = st.get("tasks") or 0
+    sr = st.get("success_rate")
+    wall = st.get("wall_clock_sec") or 0
+    avg = (st.get("task_time_sum_sec") or 0) / n if n else 0
+    a = meta.get("args", {})
+    with open(idx, "a", encoding="utf-8") as f:
+        if fresh:
+            f.write(_INDEX_HEADER)
+        f.write("| `{run}` | {host} | {ts} | {n} | {envs} | {ms} | {sr} | "
+                "{wall:.2f} | {avg:.0f} | `{git}` |\n".format(
+                    run=meta.get("run_name", "-"), host=meta.get("hostname", "-"),
+                    ts=meta.get("started_utc", "-"), n=n,
+                    envs=a.get("num_envs", "-"), ms=a.get("max_steps", "-"),
+                    sr=("%.1f%%" % (100 * sr)) if sr is not None else "-",
+                    wall=wall / 3600, avg=avg,
+                    git=(meta.get("git_commit") or "")[:8]
+                        + ("+dirty" if meta.get("git_dirty") else "")))
+    return idx
+
+
 def main():
     args = parse_args()
-    _init_writer(args.result_dir)
+    runs_root = os.path.abspath(args.runs_root or os.path.join(REPO_ROOT, "runs"))
 
     if args.report_only:
-        report(args.result_dir)
+        run_dir = os.path.abspath(args.result_dir) if args.result_dir \
+            else _latest_run(runs_root)
+        if not run_dir:
+            print(f"[!] {runs_root} 下没有任何带 perf/ 的 run,先跑一次评测")
+            sys.exit(1)
+        print(f">>> 报告目录: {run_dir}")
+        report(run_dir)
         return
+
+    if args.result_dir:
+        run_dir = os.path.abspath(args.result_dir)
+    else:
+        stamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+        run_dir = os.path.join(runs_root,
+                               args.run_name or f"{stamp}_{socket.gethostname().split('.')[0]}")
+
+    os.makedirs(runs_root, exist_ok=True)
+    os.makedirs(run_dir, exist_ok=True)
+    _init_writer(run_dir)
+
+    # 模型输入输出默认留档:agent 会把每次请求/响应写到
+    # <run_dir>/.../<任务id>/llm_io/call_NNN.json,图片按 sha1 去重存同目录。
+    if not args.no_dump_llm_io:
+        os.environ["OSWORLD_DUMP_LLM_IO"] = "1"
 
     if not args.skip_preflight:
         preflight(args)
 
-    for d in ("logs", args.result_dir, "cache"):
+    for d in ("logs", "cache", os.path.join(REPO_ROOT, "logs"),
+              os.path.join(REPO_ROOT, "cache")):
         os.makedirs(d, exist_ok=True)
+
+    meta = write_run_meta(run_dir, args, args.task_set)
+    print(f"\n>>> 本次 run 目录: {run_dir}")
+    print(f"    机器 {meta['hostname']} | git {(meta.get('git_commit') or '')[:8]}"
+          f"{' (dirty)' if meta.get('git_dirty') else ''}"
+          f" | 模型输入输出留档 {'开' if meta['dump_llm_io'] else '关'}")
 
     install_patches()
 
@@ -419,7 +552,7 @@ def main():
         "--screen_width", str(args.screen_width),
         "--screen_height", str(args.screen_height),
         "--num_envs", str(args.num_envs),
-        "--result_dir", args.result_dir,
+        "--result_dir", run_dir,
     ]
     print(">>> 启动评测:", " ".join(sys.argv[1:]), "\n")
 
@@ -431,7 +564,13 @@ def main():
     except KeyboardInterrupt:
         print("\n[perf] 收到 Ctrl+C,先出报告")
     finally:
-        report(args.result_dir)
+        report(run_dir)
+        try:
+            idx = append_index(runs_root, run_dir, meta)
+            print(f"  索引已更新 {idx}")
+        except Exception as e:
+            print(f"[perf] 索引更新失败(不影响数据): {e}")
+        print(f"  本次 run 全部产出在 {run_dir}\n")
 
 
 if __name__ == "__main__":

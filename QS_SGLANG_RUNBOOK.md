@@ -34,6 +34,9 @@ export https_proxy=$http_proxy
 export no_proxy="localhost,127.0.0.1,::1,.xiaohongshu.com"
 export NO_PROXY="$no_proxy"
 
+# 仓库位置:必须放云盘,机器换了产出才还在(/data 是本机盘,一换就没)
+export OSWORLD_HOME=/mnt/tidal-nj01/dataset/<你>/OSWorld-main-nex
+
 # nex(WORKSPACE_ID 用你自己的,别抄文档里樊思琪那个,会 403)
 export NEX_API_KEY=ak-<你的key>
 export NEX_TEMPLATE=osworld-guest
@@ -127,10 +130,13 @@ curl -s http://127.0.0.1:8000/v1/chat/completions -H 'Content-Type: application/
 
 ## 4. 拉代码 + 装依赖
 
+**clone 到云盘,不要 clone 到 `/data`。**`/data` 是本机盘,机器一换 `runs/` 里的
+统计和模型输入输出全没了;云盘上的仓库换机器直接接着用。
+
 ```bash
-cd /data
-git clone https://<user>:<token>@github.com/fxsc03/OSWorld-main-nex.git OSWorld-main
-cd /data/OSWorld-main
+mkdir -p "$(dirname "$OSWORLD_HOME")" && cd "$(dirname "$OSWORLD_HOME")"
+git clone https://<user>:<token>@github.com/fxsc03/OSWorld-main-nex.git "$(basename "$OSWORLD_HOME")"
+cd "$OSWORLD_HOME"
 git remote set-url origin https://github.com/fxsc03/OSWorld-main-nex.git   # 抹掉明文 token
 
 mkdir -p logs results cache        # logs/ 不存在脚本会直接崩
@@ -157,7 +163,7 @@ python nex_env_check.py     # 全绿
 ### 5.1 沙箱链路(不碰模型)
 
 ```bash
-source /data/osworld_env.sh && cd /data/OSWorld-main
+source /data/osworld_env.sh && cd "$OSWORLD_HOME"
 python -m desktop_env.providers.nex.manager
 ```
 
@@ -173,36 +179,78 @@ python nex_task_smoke.py
 
 ### 5.3 接模型跑评测
 
-```bash
-source /data/osworld_env.sh && cd /data/OSWorld-main
+先用 5 个任务过一遍(约 30–45 分钟):
 
-python sample_local_qwen3vl.py \
-  --provider_name nex \
-  --test_all_meta_path evaluation_examples/smoke_test_5tasks.json \
-  --model qwen3-vl \
-  --headless --observation_type screenshot \
-  --max_steps 15 --max_tokens 4096 --num_envs 1 \
-  --result_dir ./results_run1
+```bash
+source /data/osworld_env.sh && cd "$OSWORLD_HOME"     # 云盘上的仓库目录
+
+python run_full_eval.py \
+  --task_set evaluation_examples/smoke_test_5tasks.json \
+  --num_envs 1
 ```
 
-全量换成 `evaluation_examples/test_all.json`(369 个任务),并用 `nohup ... &` 后台跑。
+跑完会自动打印分阶段耗时报告,产出落在 `runs/<时间戳>_<机器名>/`(见第 6 节)。
 
-**看结果:** `python show_result.py --result_dir ./results_run1`
+> 也可以直接调底层的 `python sample_local_qwen3vl.py --provider_name nex ... --result_dir ...`,
+> 但那样没有性能埋点、没有预检、也不会自动归档到 `runs/`。日常用 `run_full_eval.py` 就够了。
+
+全量换成 `evaluation_examples/test_all.json`(369 个任务)。**一定要 `setsid`**(见第 7 节):
+
+```bash
+setsid nohup python run_full_eval.py --num_envs 2 \
+  < /dev/null > /data/full_eval.log 2>&1 &
+tail -f /data/full_eval.log
+```
 
 ---
 
-## 6. 留档模型输入输出(可选)
+## 6. 产出放哪(换机器靠云盘同步)
 
-```bash
-export OSWORLD_DUMP_LLM_IO=1      # 跑之前 export
+**前提:仓库必须 clone 在云盘上**(比如 `/mnt/tidal-nj01/dataset/<你>/OSWorld-main-nex`),
+不要放 `/data`——`/data` 是本机盘,机器一换就没了。
+
+`run_full_eval.py` 的输出目录**锚定在脚本所在目录**(=仓库根),跟你在哪个 cwd 敲命令无关。
+不传 `--result_dir` 时,每跑一次自动开一个新目录:
+
+```
+OSWorld-main-nex/
+└── runs/
+    ├── INDEX.md                          # 历次 run 一行一条,跨机器横向对比
+    ├── 20260820-131500_qs-246045/        # <UTC时间戳>_<机器名>
+    │   ├── run_meta.json                 # 机器名 / GPU / git sha / 全部参数 / SGLang 端点
+    │   ├── perf_stats.json               # 机器可读的阶段统计
+    │   ├── perf/events_<pid>.jsonl       # 原始逐事件埋点
+    │   └── pyautogui/screenshot/qwen3-vl/<域>/<任务id>/
+    │       ├── traj.jsonl  result.txt  step_*.png
+    │       └── llm_io/
+    │           ├── call_000.json         # 完整 request(system prompt+全部历史)+ 原始 response + 耗时
+    │           └── img_<哈希>.png        # 那一轮真正喂给模型的图,按内容去重
+    └── 20260821-020000_qs-246099/        # 换机器后新开一个,不覆盖旧的
 ```
 
-产出在 `<result_dir>/.../<任务id>/0/llm_io/`:
+因为目录名带时间戳和机器名,**换多少台机器都不会互相覆盖**,云盘一同步就都在。
 
-- `call_NNN.json` —— 每次调模型:完整 request(system prompt + 全部历史消息)+ 原始 response + 耗时
-- `img_<哈希>.png` —— 那一轮真正喂给模型的图,按内容去重
+相关开关:
 
-**跑全量时务必关掉**,不然留档几个 GB。
+| 参数 | 默认 | 说明 |
+|---|---|---|
+| `--result_dir` | 不给 | 给了就用它,不再自动开时间戳目录 |
+| `--run_name` | `<时间戳>_<机器名>` | 自定义本次目录名,如 `--run_name baseline-369` |
+| `--runs_root` | `<仓库>/runs` | 换个父目录 |
+| `--no_dump_llm_io` | 关(即默认留档) | 模型输入输出默认**开**;全量 369 任务约 4–6 GB,云盘配额紧就加这个参数 |
+
+**出报告**(跑完自动打印一次;想重看或中途 Ctrl+C 后补打):
+
+```bash
+python run_full_eval.py --report_only                  # 自动取最近一次 run
+python run_full_eval.py --report_only --result_dir runs/20260820-131500_qs-246045
+```
+
+**看准确率:** `python show_result.py --result_dir runs/<那次>/`
+
+**git 说明:** `.gitignore` 里已经放行 `runs/INDEX.md`、`run_meta.json`、`perf_stats.json`、
+`perf/*.jsonl`,截图和 `llm_io/` 仍被忽略(太大)。也就是说**统计能进 git,大文件只留云盘**。
+`run_meta.json` 刻意不记录 `NEX_API_KEY`。
 
 ---
 
