@@ -82,21 +82,24 @@ tail -f /data/dl.log     # 看到 "✓ Downloaded" 就是好了,Ctrl+C 退出 ta
 8B 模型单卡放得下,**不要用 `--tp 2`**,一卡一个副本吞吐更高。
 
 ```bash
-mkdir -p /data/sgl_pids
 source /data/osworld_env.sh
 
 for i in 0 1; do          # 卡数按实际改
   PORT=$((8000 + i))
-  CUDA_VISIBLE_DEVICES=$i nohup python3 -m sglang.launch_server \
+  CUDA_VISIBLE_DEVICES=$i setsid nohup python3 -m sglang.launch_server \
     --model-path /data/models/Qwen3-VL-8B-Instruct \
     --served-model-name qwen3-vl \
     --host 0.0.0.0 --port $PORT \
     --tp 1 \
     --mem-fraction-static 0.85 \
     --context-length 32768 \
-    > /data/sgl_${PORT}.log 2>&1 &
-  echo $! > /data/sgl_pids/${PORT}.pid
+    < /dev/null > /data/sgl_${PORT}.log 2>&1 &
 done
+```
+
+> `setsid` + `< /dev/null` 不是可选的。网页终端(qs2 的 pod terminal)断线重连会把当前会话的子进程全杀掉,只写 `nohup` 也没用 —— 表现是回来一看 `[1]- Killed`、日志停在加载一半。`setsid` 把进程脱离会话组才活得下来。详见第 7 节。
+
+```bash
 
 # 等就绪(首次加载几分钟)
 for PORT in 8000 8001; do
@@ -132,7 +135,12 @@ git remote set-url origin https://github.com/fxsc03/OSWorld-main-nex.git   # 抹
 
 mkdir -p logs results cache        # logs/ 不存在脚本会直接崩
 pip install -r requirements.txt
+
+# 必做:上一行会把 protobuf 降到 5.29.6,SGLang 起不来。装完依赖立刻修回来
+pip install 'protobuf>=6.31.1,<7'
 ```
+
+**装完依赖一定要重启 SGLang 并确认 `/health` 还是通的** —— `pip install -r requirements.txt` 会动 protobuf,已经在跑的服务不受影响,但下次重启就崩。详见第 7 节。
 
 `requirements.txt` 里已经带了 numpy 兼容性约束(`numpy<2 / scipy<1.18 / librosa<1.0 / tifffile<2026.4`),不要删,删了会踩 `_ARRAY_API not found` 和 `np.long` 两个坑。
 
@@ -199,6 +207,51 @@ export OSWORLD_DUMP_LLM_IO=1      # 跑之前 export
 ---
 
 ## 7. 已知坑(踩过的,别再踩)
+
+### protobuf 版本冲突:装完 OSWorld 依赖,SGLang 就起不来了
+
+`pip install -r requirements.txt` 会把 protobuf **降级到 5.29.6**(某个依赖的上限),而 SGLang 的生成代码要 6.31.1+。表现是 SGLang 启动即挂:
+
+```
+google.protobuf.runtime_version.VersionError:
+Detected incompatible Protobuf Gencode/Runtime versions when loading ...:
+gencode 6.31.1, runtime 5.29.6.
+```
+
+顺序无所谓,**最后一步一定是**:
+
+```bash
+pip install 'protobuf>=6.31.1,<7'      # 实际装到 6.33.6
+```
+
+`<7` 不能省。不加上限会装到 7.x,grpcio-reflection / grpcio-health-checking 要求 `protobuf<7.0`,一样崩,只是换个报错。
+
+装完 `python3 -c "import google.protobuf; print(google.protobuf.__version__)"` 应该是 6.x。
+
+### 网页终端断线会杀掉 `nohup` 起的进程
+
+qs2 的 pod web terminal 一断线重连,当前会话的子进程全被清掉,**光写 `nohup` 挡不住**。表现:
+
+```
+[1]-  Killed                  CUDA_VISIBLE_DEVICES=0 nohup python3 -m sglang.launch_server ...
+```
+
+日志停在模型加载一半,GPU 显存掉回 0。正确写法是加 `setsid` 让进程脱离会话组,并且把 stdin 接到 `/dev/null`:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 setsid nohup python3 -m sglang.launch_server ... \
+  < /dev/null > /data/sgl_8000.log 2>&1 &
+```
+
+同理,**跑几十小时的全量评测也要用 `setsid`**,否则关掉网页 = 前功尽弃:
+
+```bash
+setsid nohup python run_full_eval.py --num_envs 2 \
+  < /dev/null > /data/full_eval.log 2>&1 &
+tail -f /data/full_eval.log       # 之后随时重连再 tail
+```
+
+活着的判断:`nvidia-smi` 显存还占着 + `curl -fsS http://127.0.0.1:8000/health`。
 
 ### 用 `sample_local_qwen3vl.py`,不要用 `run_multienv_qwen3vl.py`
 
