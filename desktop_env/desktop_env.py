@@ -306,14 +306,15 @@ class DesktopEnv(gym.Env):
         # soffice single-instance behavior: launching with --accept while a
         # soffice is already running adds the listener to the existing
         # process WITHOUT closing the documents opened by _open_setup.
-        try:
-            self.setup_controller._launch_setup(
-                'soffice --accept="socket,host=localhost,port=2002;urp;" --norestore --nologo --nodefault',
-                shell=True,
-            )
-            time.sleep(5)
-        except Exception as e:
-            logger.warning(f"Failed to enable soffice UNO accept socket: {e}")
+        if self._mcp_enabled():
+            try:
+                self.setup_controller._launch_setup(
+                    'soffice --accept="socket,host=localhost,port=2002;urp;" --norestore --nologo --nodefault',
+                    shell=True,
+                )
+                time.sleep(5)
+            except Exception as e:
+                logger.warning(f"Failed to enable soffice UNO accept socket: {e}")
 
         # Ensure MCP server + file stubs are ready BEFORE the final _get_obs,
         # because _get_obs calls get_mcp_tool_list which imports OsworldMcpClient
@@ -322,26 +323,141 @@ class DesktopEnv(gym.Env):
         # Close the gnome-session-failed error window before the first
         # _get_obs, otherwise the agent's screenshot is the error page.
         self._dismiss_session_failed()
+        if self.provider_name == "nex":
+            time.sleep(float(os.environ.get("NEX_POST_SETUP_SETTLE", "2.0")))
 
-        try:
-            self._ensure_mcp_server()
-        except Exception as e:
-            logger.warning(f"Failed to ensure MCP server: {e}")
+        if self._mcp_enabled():
+            try:
+                self._ensure_mcp_server()
+            except Exception as e:
+                logger.warning(f"Failed to ensure MCP server: {e}")
+        else:
+            logger.info(
+                "MCP skipped (no %s/mcp here, or OSWORLD_DISABLE_MCP=1); "
+                "saves ~74s per task and ~3.4s per step, tool_list stays []",
+                self._MCP_SRC_ROOT,
+            )
 
         observation = self._get_obs()
         return observation
 
-    def maximize_window(self):
-        window_state = r"""import subprocess;
+    _WINDOW_STATE_PROBE = r"""import subprocess;
 command = "xprop -id $(xprop -root _NET_ACTIVE_WINDOW | awk -F' ' '{print $5}') _NET_WM_STATE"
 output = subprocess.run(command, shell=True, capture_output=True, text=True).stdout.strip();
 print(output);"""
+
+    _GUEST_RESTORE_DESKTOP = """
+import os, subprocess, time
+os.environ.setdefault("DISPLAY", ":0")
+try:
+    subprocess.run(["xdotool", "key", "Escape"], capture_output=True, timeout=5)
+except Exception:
+    pass
+ids = []
+try:
+    out = subprocess.run(["wmctrl", "-lx"], capture_output=True, text=True, timeout=15).stdout
+    for line in out.splitlines():
+        parts = line.split(None, 4)
+        if len(parts) >= 3 and parts[1] != "-1" and "session-failed" not in parts[2].lower():
+            ids.append(parts[0])
+except Exception:
+    pass
+if ids:
+    subprocess.run(["wmctrl", "-i", "-a", ids[-1]], capture_output=True, timeout=10)
+    time.sleep(0.5)
+    subprocess.run(["wmctrl", "-r", ":ACTIVE:", "-b", "add,maximized_vert"], capture_output=True, timeout=10)
+    subprocess.run(["wmctrl", "-r", ":ACTIVE:", "-b", "add,maximized_horz"], capture_output=True, timeout=10)
+print("restored_desktop=" + (ids[-1] if ids else "no_window"))
+"""
+
+    def _restore_desktop(self):
+        """Leave the Activities overview, then re-activate + maximise the app.
+
+        The nex container runs GNOME without systemd, so once setup finishes
+        no application window holds focus and the shell settles into the
+        Activities overview. There every window is drawn as a ~79% scaled and
+        offset thumbnail, so a screenshot taken in that state has a coordinate
+        system that does not match the real screen: every normalized
+        coordinate the agent emits lands somewhere else, and its first click
+        only dismisses the overview instead of doing the intended work.
+
+        _dismiss_session_failed() already carries the activate+maximise
+        recovery, but gates it on having found a gnome-session-failed window
+        (`if hidden:`), which the plain overview does not have.
+
+        Returns True when a window was activated, False when the guest has no
+        normal window to activate -- callers must not retry in that case, or
+        every step pays the full maximize loop for nothing.
+        Set OSWORLD_KEEP_OVERVIEW=1 to skip for explicit A/B experiments.
+        """
+        if os.environ.get("OSWORLD_KEEP_OVERVIEW"):
+            return False
+        try:
+            out = self.controller.execute_python_command(
+                self._GUEST_RESTORE_DESKTOP).get("output", "").strip()
+        except Exception as e:
+            logger.warning("_restore_desktop failed: %s", e)
+            return False
+        logger.info("_restore_desktop: %s", out)
+        return "no_window" not in out
+
+    def _window_state(self):
+        return self.controller.execute_python_command(
+            self._WINDOW_STATE_PROBE)['output'].strip()
+
+    @staticmethod
+    def _state_is_ok(out):
+        """True when the active window needs no maximizing.
+
+        "Nothing is focused" is deliberately NOT ok: that is exactly the
+        Activities overview, where the screenshot is a scaled thumbnail of the
+        desktop rather than the desktop itself. Treating it as ok turned
+        maximize_window() into a no-op for 303/303 tasks of the 20260826 run
+        (98.2% of 11964 calls returned within 0.109s) and left 91% of step_0
+        screenshots showing the overview.
+        """
+        if '_NET_WM_STATE_FOCUSED' not in out:
+            return False
+        return ('_NET_WM_STATE_SKIP_TASKBAR' in out
+                or '_NET_WM_STATE_MODAL' in out
+                or '_NET_WM_STATE_MAXIMIZED' in out)
+
+    def _window_already_ok(self):
+        """Same predicate the maximize loop uses to decide it is done."""
+        return self._state_is_ok(self._window_state())
+
+    def maximize_window(self):
+        """Check before acting.
+
+        The original body (now _maximize_window_force) runs
+        wmctrl -> sleep(2) -> probe. Once the window is maximized every
+        later step still paid that 2s to confirm something already true --
+        ~107s per 50-step task, 19% of task time. Probing first costs
+        ~0.1s; when the window is NOT yet maximized the old path runs
+        unchanged. OSWORLD_ALWAYS_MAXIMIZE=1 restores the old order.
+        """
+        if os.environ.get("OSWORLD_ALWAYS_MAXIMIZE", "").strip() != "1":
+            try:
+                if self._window_already_ok():
+                    return
+            except Exception as e:
+                logger.warning(f"maximize_window pre-check failed, falling back: {e}")
+        self._maximize_window_force()
+
+    def _maximize_window_force(self):
         for _ in range(5):
             try:
+                if '_NET_WM_STATE_FOCUSED' not in self._window_state():
+                    # Nothing focused -> the shell is in the Activities
+                    # overview, where `wmctrl -r :ACTIVE:` has no target to
+                    # act on. Get back to the desktop first; if the guest has
+                    # no normal window at all there is nothing to maximise, so
+                    # bail out instead of burning 5 x 2s on every step.
+                    if not self._restore_desktop():
+                        return
                 self.setup_controller._launch_setup('wmctrl -r :ACTIVE: -b add,maximized_vert,maximized_horz', shell=True)
                 time.sleep(2)
-                output = self.controller.execute_python_command(window_state)['output'].strip()
-                if '_NET_WM_STATE_FOCUSED' not in output or '_NET_WM_STATE_SKIP_TASKBAR' in output or '_NET_WM_STATE_MODAL' in output or '_NET_WM_STATE_MAXIMIZED' in output:
+                if self._state_is_ok(self._window_state()):
                     return
             except Exception as e:
                 logger.error(f"Failed to maximize window: {e}")
@@ -472,6 +588,23 @@ except Exception:
         "MCP_SRC_ROOT",
         "/mnt/tidal-alsh-share2/dataset/fansiqi1/OSWorld-MCP",
     )
+
+    def _mcp_enabled(self):
+        """Whether the MCP path is worth running on this host.
+
+        MCP is not part of upstream OSWorld; it was ported in from
+        OSWorld-MCP. When _MCP_SRC_ROOT is not mounted here it can never
+        start, and every task then burns ~74s on the readiness timeout plus
+        ~3.4s per step on get_mcp_tool_list -- while tool_list is read by no
+        agent in this repo. So default to autodetecting the source tree.
+        Overrides: OSWORLD_DISABLE_MCP=1 forces off (use for A/B),
+                   OSWORLD_FORCE_MCP=1 forces on.
+        """
+        if os.environ.get("OSWORLD_DISABLE_MCP", "").strip() == "1":
+            return False
+        if os.environ.get("OSWORLD_FORCE_MCP", "").strip() == "1":
+            return True
+        return os.path.isdir(os.path.join(self._MCP_SRC_ROOT, "mcp"))
 
     def _inject_mcp_files_if_empty(self):
         """Idempotent wrapper around _inject_mcp_files: skip if already populated."""
@@ -683,7 +816,7 @@ except Exception:
     _GUEST_DISMISS_SESSION_FAILED = """
 import os, subprocess, time
 os.environ.setdefault("DISPLAY", ":0")
-closed = []
+hidden = []
 try:
     out = subprocess.run(["wmctrl", "-lx"], capture_output=True, text=True, timeout=15).stdout
 except Exception:
@@ -691,20 +824,36 @@ except Exception:
 for line in out.splitlines():
     parts = line.split(None, 4)
     if len(parts) >= 3 and "session-failed" in parts[2].lower():
-        subprocess.run(["wmctrl", "-i", "-c", parts[0]], timeout=10)
-        closed.append(parts[0])
-if closed:
-    time.sleep(1.5)
+        window_id = parts[0]
+        try:
+            from Xlib import display
+            x_display = display.Display()
+            window = x_display.create_resource_object("window", int(window_id, 16))
+            window.unmap()
+            x_display.sync()
+            x_display.close()
+        except Exception:
+            for state in ("fullscreen", "above", "sticky", "skip_taskbar"):
+                subprocess.run(["wmctrl", "-i", "-r", window_id, "-b", "remove," + state], timeout=10)
+            subprocess.run(["wmctrl", "-i", "-r", window_id, "-e", "0,-10000,-10000,1,1"], timeout=10)
+        hidden.append(window_id)
+if hidden:
+    time.sleep(0.5)
     try:
-        o2 = subprocess.run(["wmctrl", "-l"], capture_output=True, text=True, timeout=15).stdout
-        ids = [l.split()[0] for l in o2.splitlines() if len(l.split()) > 1 and l.split()[1] != "-1"]
+        out = subprocess.run(["wmctrl", "-lx"], capture_output=True, text=True, timeout=15).stdout
+        ids = []
+        for line in out.splitlines():
+            parts = line.split(None, 4)
+            if len(parts) >= 3 and parts[1] != "-1" and "session-failed" not in parts[2].lower():
+                ids.append(parts[0])
         if ids:
             subprocess.run(["wmctrl", "-i", "-a", ids[-1]], timeout=10)
             time.sleep(0.5)
-            subprocess.run(["wmctrl", "-r", ":ACTIVE:", "-b", "add,maximized_vert,maximized_horz"], timeout=10)
+            subprocess.run(["wmctrl", "-r", ":ACTIVE:", "-b", "add,maximized_vert"], timeout=10)
+            subprocess.run(["wmctrl", "-r", ":ACTIVE:", "-b", "add,maximized_horz"], timeout=10)
     except Exception:
         pass
-print("closed_session_failed=" + ",".join(closed) if closed else "no_session_failed_window")
+print("hidden_session_failed=" + ",".join(hidden) if hidden else "no_session_failed_window")
 """
 
     def _dismiss_session_failed(self):
@@ -717,9 +866,9 @@ print("closed_session_failed=" + ",".join(closed) if closed else "no_session_fai
             never the target application
           - every agent click is swallowed by it, the screen never changes and
             the agent loops on the same action until max_steps runs out
-        We find it by WM_CLASS, close it, then re-activate and maximise the
-        remaining application window.
-        Set OSWORLD_KEEP_SESSION_FAILED=1 to skip (for A/B experiments).
+        We find it by WM_CLASS, unmap it without terminating the GNOME session,
+        then re-activate and maximise the remaining application window.
+        Set OSWORLD_KEEP_SESSION_FAILED=1 to skip for explicit A/B experiments.
         """
         if os.environ.get("OSWORLD_KEEP_SESSION_FAILED"):
             return
@@ -831,7 +980,7 @@ print("closed_session_failed=" + ",".join(closed) if closed else "no_session_fai
         if not tool_name:
             tool_name = self._infer_app_from_instruction(getattr(self, "instruction", None))
         tool_list = []
-        if tool_name is not None:
+        if tool_name is not None and self._mcp_enabled():
             try:
                 tool_list = self.get_mcp_tool_list(tool_name, instruction=getattr(self, "instruction", None))
             except Exception as e:

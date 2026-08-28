@@ -36,7 +36,9 @@ REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
 # ─────────────────────────────────────────────────────────────────────
 def parse_args():
     p = argparse.ArgumentParser(description="OSWorld 全量评测 + 性能埋点")
-    p.add_argument("--task_set", default="evaluation_examples/test_all.json")
+    p.add_argument("--task_set", default="evaluation_examples/test_all_no_internet.json",
+                   help="默认 309 个免联网任务(test_all.json 的子集),与 fansiqi 的评测集一致。"
+                        "要跑 369 全量: --task_set evaluation_examples/test_all.json")
     p.add_argument("--result_dir", default=None,
                    help="显式指定输出目录;不给则用 <仓库>/runs/<UTC时间戳>_<机器名>/")
     p.add_argument("--runs_root", default=None,
@@ -44,24 +46,38 @@ def parse_args():
     p.add_argument("--run_name", default=None,
                    help="本次 run 的目录名,默认 <UTC时间戳>_<机器名>")
     p.add_argument("--model", default="qwen3-vl")
-    p.add_argument("--num_envs", type=int, default=2)
+    p.add_argument("--num_envs", type=int, default=10,
+                   help="run1 实测可跑的并发数。fansiqi 用 96,但那是本机 docker;"
+                        "nex 工作空间配额撑不住,往上抬会 422 quota exceeded")
 
     # 与 run_multienv_qwen3vl.py 默认值对齐
-    p.add_argument("--max_steps", type=int, default=15)
+    p.add_argument("--max_steps", type=int, default=50,
+                   help="OSWorld 官方基线是 15;本实验改成 50。"
+                        "改了就不能直接和公开的 15 步数字比，run_meta.json 里有记录")
     p.add_argument("--temperature", type=float, default=0)
     p.add_argument("--top_p", type=float, default=0.9)
     p.add_argument("--coordinate_type", default="relative",
                    choices=["absolute", "relative", "qwen25"])
     p.add_argument("--observation_type", default="screenshot")
-    p.add_argument("--max_image_history_length", type=int, default=3)
+    p.add_argument("--max_image_history_length", type=int, default=4,
+                   help="对齐 fansiqi。历史截图多一张 -> 输入 token 变多;"
+                        "agent 里 model_ctx_limit 写死 32768,超了会自动降 max_tokens")
+    p.add_argument("--max_reward_image_history_length", type=int, default=1,
+                   help="对齐 fansiqi(sample_local_qwen3vl.py 默认 2)。"
+                        "只影响 trajectory 里存的 reward_messages,不进决策 prompt,对分数无影响")
     p.add_argument("--screen_width", type=int, default=1920)
     p.add_argument("--screen_height", type=int, default=1080)
 
     # 必须偏离其默认值的两个
-    p.add_argument("--max_tokens", type=int, default=4096,
-                   help="它默认 32768;输入+输出超过 context-length 会被 SGLang 返回 400")
-    p.add_argument("--sleep_after_execution", type=float, default=5.0,
-                   help="它默认 0.0;动作后 UI 未重绘就截图会系统性失分,复现实验勿调小")
+    p.add_argument("--max_tokens", type=int, default=8192,
+                   help="对齐 fansiqi。它默认 32768,输入+输出超过 context-length 会被返回 400。"
+                        "run1 用 4096 实测从没碰到过上限(输出 p50≈458 / max≈882 token,"
+                        "12883 次调用里只有 2 次 finish_reason=length),抬到 8192 只是对齐,"
+                        "不改变行为")
+    p.add_argument("--sleep_after_execution", type=float, default=2.0,
+                   help="fansiqi 用 0.0,但她跑本机 docker 近零延迟;这里是 nex 远程沙箱,"
+                        "动作后 UI 未重绘就截图会系统性失分。run1 用 5.0,折中到 2.0 省等待时间。"
+                        "跑完务必查重复截图健康度,若明显变差就调回 5.0")
 
     p.add_argument("--no_dump_llm_io", action="store_true",
                    help="关掉模型输入输出留档(默认开,写到每个任务目录的 llm_io/)")
@@ -548,6 +564,7 @@ def main():
         "--top_p", str(args.top_p),
         "--coordinate_type", args.coordinate_type,
         "--max_image_history_length", str(args.max_image_history_length),
+        "--max_reward_image_history_length", str(args.max_reward_image_history_length),
         "--sleep_after_execution", str(args.sleep_after_execution),
         "--screen_width", str(args.screen_width),
         "--screen_height", str(args.screen_height),
