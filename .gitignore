@@ -220,3 +220,6 @@ runs/**
 !runs/*/perf/
 !runs/*/perf/*.jsonl
 !runs/.gitkeep
+
+# evaluation outputs - never commit
+runs/
