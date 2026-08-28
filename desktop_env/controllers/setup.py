@@ -96,6 +96,7 @@ class SetupController:
             try:
                 logger.info(f"Executing setup step {i+1}/{len(config)}: {setup_function}")
                 logger.debug(f"Setup parameters: {parameters}")
+                _SETUP_GUEST['ctl'] = self
                 getattr(self, setup_function)(**parameters)
                 logger.info(f"SETUP COMPLETED: {setup_function}({str(parameters)})")
             except Exception as e:
@@ -487,24 +488,105 @@ class SetupController:
         # TODO
         raise NotImplementedError()
 
+    # --- window activation --------------------------------------------------
+    # The guest's /setup/activate_window shells out to wmctrl and returns 200
+    # unconditionally. Under GNOME the Activities overview can also hold the
+    # keyboard focus, so an activation may "succeed" while later keystrokes
+    # (e.g. an evaluator postconfig's Ctrl+S) go nowhere and the task scores 0
+    # even though the agent completed it. So: verify the real X input focus
+    # after activating; if it did not land, press Escape (leaves the overview)
+    # and retry via wmctrl. Failures are loud and grep-able.
+
+    _GUEST_FOCUS_PROBE = (
+        "from Xlib import display, X, Xatom\n"
+        "d = display.Display(); root = d.screen().root\n"
+        "def title(w):\n"
+        "    for _ in range(8):\n"
+        "        for a in (d.intern_atom('_NET_WM_NAME'), Xatom.WM_NAME):\n"
+        "            try: p = w.get_full_property(a, X.AnyPropertyType)\n"
+        "            except Exception: return ''\n"
+        "            if p and p.value:\n"
+        "                v = p.value\n"
+        "                return v.decode('utf-8', 'replace') if isinstance(v, bytes) else v\n"
+        "        try: parent = w.query_tree().parent\n"
+        "        except Exception: return ''\n"
+        "        if not parent or parent.id == w.id: return ''\n"
+        "        w = parent\n"
+        "    return ''\n"
+        "try:\n"
+        "    f = d.get_input_focus().focus\n"
+        "    print(title(f) if hasattr(f, 'query_tree') else '')\n"
+        "except Exception:\n"
+        "    print('')\n"
+    )
+
+    _GUEST_PRESS_ESCAPE = "import pyautogui, time; pyautogui.press('escape'); time.sleep(0.4)"
+
+    def _guest_exec(self, command, timeout: int = 30):
+        """Run a command in the guest via /setup/execute.
+
+        Returns (returncode, stdout, stderr); returncode is None when the
+        request itself failed."""
+        payload = json.dumps({"command": command, "shell": False})
+        try:
+            response = requests.post(self.http_server + "/setup" + "/execute",
+                                     headers={"Content-Type": "application/json"},
+                                     data=payload, timeout=timeout)
+            if response.status_code != 200:
+                return None, "", "HTTP %d: %s" % (response.status_code, response.text[:200])
+            body = response.json()
+            return body.get("returncode"), body.get("output") or "", body.get("error") or ""
+        except Exception as e:
+            return None, "", str(e)
+
+    def _window_is_active(self, window_name: str, strict: bool,
+                          retries: int = 4, delay: float = 0.3):
+        """True/False = keyboard focus verified; None = not observable (no Xlib)."""
+        unavailable = True
+        for i in range(retries):
+            rc, out, _ = self._guest_exec(["python3", "-c", self._GUEST_FOCUS_PROBE])
+            if rc == 0:
+                unavailable = False
+                title = out.strip()
+                if title and ((title == window_name) if strict else (window_name in title)):
+                    return True
+            if i + 1 < retries:
+                time.sleep(delay)
+        return None if unavailable else False
+
     def _activate_window_setup(self, window_name: str, strict: bool = False, by_class: bool = False):
         if not window_name:
             raise Exception(f"Setup Open - Invalid path ({window_name}).")
 
         payload = json.dumps({"window_name": window_name, "strict": strict, "by_class": by_class})
-        headers = {
-            'Content-Type': 'application/json'
-        }
-
-        # send request to server to open file
         try:
-            response = requests.post(self.http_server + "/setup" + "/activate_window", headers=headers, data=payload)
-            if response.status_code == 200:
-                logger.info("Command executed successfully: %s", response.text)
-            else:
-                logger.error(f"Failed to activate window {window_name}. Status code: %s", response.text)
+            response = requests.post(self.http_server + "/setup" + "/activate_window",
+                                     headers={"Content-Type": "application/json"},
+                                     data=payload, timeout=30)
+            endpoint = "HTTP %d %s" % (response.status_code, response.text[:80].strip())
+            endpoint_ok = response.status_code == 200
         except requests.exceptions.RequestException as e:
-            logger.error("An error occurred while trying to send the request: %s", e)
+            endpoint, endpoint_ok = "request failed: %s" % e, False
+
+        state = self._window_is_active(window_name, strict)
+        if state is True or (state is None and endpoint_ok):
+            # focus verified, or unverifiable but endpoint succeeded (legacy behaviour)
+            return True
+
+        # Focus did not land - typically the Activities overview holds it.
+        self._guest_exec(["python", "-c", self._GUEST_PRESS_ESCAPE])
+        flags = "-{}{}a".format("x" if by_class else "", "F" if strict else "")
+        rc, _, err = self._guest_exec(["wmctrl", flags, window_name])
+        if self._window_is_active(window_name, strict) is True:
+            logger.info("Activated window %r after Escape + wmctrl.", window_name)
+            return True
+
+        logger.error(
+            "ACTIVATE_WINDOW_FAILED window=%r strict=%s by_class=%s :: endpoint[%s] "
+            "wmctrl[rc=%s %s] :: later keystrokes (e.g. Ctrl+S) may go nowhere, so "
+            "this task can score 0 even if the agent completed it.",
+            window_name, strict, by_class, endpoint, rc, err[:80].strip())
+        return False
 
     def _close_window_setup(self, window_name: str, strict: bool = False, by_class: bool = False):
         if not window_name:
@@ -598,96 +680,42 @@ class SetupController:
 
     # Chrome setup
     def _chrome_open_tabs_setup(self, urls_to_open: List[str]):
-        host = self.vm_ip
-        port = self.chromium_port  # fixme: this port is hard-coded, need to be changed from config file
+        """[guest-cdp] 在 guest 内经 loopback 用原生 CDP 开标签页。"""
+        from desktop_env.providers.nex.guest_cdp import run_cdp
+        body = """old = list(tabs())
+for u in CONFIG['urls']:
+    open_tab(u)
+time.sleep(2)
+for t in old:
+    close_tab(t.get('id'))
+for t in tabs():
+    u = t.get('url') or ''
+    if u.startswith('chrome://newtab') or u == 'about:blank':
+        close_tab(t.get('id'))
+RESULT = {'opened': [t.get('url') for t in tabs()]}
+"""
+        res = run_cdp(self.vm_ip, self.server_port, body, {"urls": list(urls_to_open)})
+        logger.info("[guest-cdp] chrome_open_tabs -> %s", res)
+        return res
 
-        remote_debugging_url = f"http://{host}:{port}"
-        logger.info("Connect to Chrome @: %s", remote_debugging_url)
-        logger.debug("PLAYWRIGHT ENV: %s", repr(os.environ))
-        for attempt in range(15):
-            if attempt > 0:
-                time.sleep(5)
-
-            browser = None
-            with sync_playwright() as p:
-                try:
-                    browser = p.chromium.connect_over_cdp(remote_debugging_url)
-                    # break
-                except Exception as e:
-                    if attempt < 14:
-                        logger.error(f"Attempt {attempt + 1}: Failed to connect, retrying. Error: {e}")
-                        # time.sleep(10)
-                        continue
-                    else:
-                        logger.error(f"Failed to connect after multiple attempts: {e}")
-                        raise e
-
-                if not browser:
-                    return
-
-                logger.info("Opening %s...", urls_to_open)
-                for i, url in enumerate(urls_to_open):
-                    # Use the first context (which should be the only one if using default profile)
-                    if i == 0:
-                        context = browser.contexts[0]
-
-                    page = context.new_page()  # Create a new page (tab) within the existing context
-                    try:
-                        page.goto(url, timeout=60000)
-                    except:
-                        logger.warning("Opening %s exceeds time limit", url)  # only for human test
-                    logger.info(f"Opened tab {i + 1}: {url}")
-
-                    if i == 0:
-                        # clear the default tab
-                        default_page = context.pages[0]
-                        default_page.close()
-
-                # Do not close the context or browser; they will remain open after script ends
-                return browser, context
 
     def _chrome_close_tabs_setup(self, urls_to_close: List[str]):
-        time.sleep(5)  # Wait for Chrome to finish launching
+        """[guest-cdp] 在 guest 内经 loopback 关标签页。"""
+        from desktop_env.providers.nex.guest_cdp import run_cdp
+        body = """want = [u.rstrip('/') for u in CONFIG['urls']]
+closed = []
+for t in tabs():
+    u = (t.get('url') or '').rstrip('/')
+    if any(u == w or u.startswith(w) for w in want):
+        close_tab(t.get('id'))
+        closed.append(u)
+RESULT = {'closed': closed}
+"""
+        res = run_cdp(self.vm_ip, self.server_port, body, {"urls": list(urls_to_close)})
+        logger.info("[guest-cdp] chrome_close_tabs -> %s", res)
+        return res
 
-        host = self.vm_ip
-        port = self.chromium_port  # fixme: this port is hard-coded, need to be changed from config file
 
-        remote_debugging_url = f"http://{host}:{port}"
-        with sync_playwright() as p:
-            browser = None
-            for attempt in range(15):
-                try:
-                    browser = p.chromium.connect_over_cdp(remote_debugging_url)
-                    break
-                except Exception as e:
-                    if attempt < 14:
-                        logger.error(f"Attempt {attempt + 1}: Failed to connect, retrying. Error: {e}")
-                        time.sleep(5)
-                    else:
-                        logger.error(f"Failed to connect after multiple attempts: {e}")
-                        raise e
-
-            if not browser:
-                return
-
-            for i, url in enumerate(urls_to_close):
-                # Use the first context (which should be the only one if using default profile)
-                if i == 0:
-                    context = browser.contexts[0]
-
-                for page in context.pages:
-
-                    # if two urls are the same, close the tab
-                    if compare_urls(page.url, url):
-                        context.pages.pop(context.pages.index(page))
-                        page.close()
-                        logger.info(f"Closed tab {i + 1}: {url}")
-                        break
-
-            # Do not close the context or browser; they will remain open after script ends
-            return browser, context
-
-    # google drive setup
     def _googledrive_setup(self, **config):
         """ Clean google drive space (eliminate the impact of previous experiments to reset the environment)
         @args:
@@ -938,3 +966,29 @@ class SetupController:
                 logger.error("An error occurred while trying to send the request: %s", e)
 
             self._execute_setup(["sudo chown -R user:user /home/user/.config/google-chrome/Default/History"], shell=True)
+
+
+# ============ guest-cdp 接管 (2026-08-22) ============
+# _login_setup 也走 guest 内 loopback,不再从宿主机 connect_over_cdp。
+_SETUP_GUEST = {}
+
+
+class _GuestPWSetup:
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def start(self): return self
+    def stop(self): pass
+
+    @property
+    def chromium(self): return self
+
+    def connect_over_cdp(self, url=None, **kw):
+        from desktop_env.providers.nex.guest_page import GuestBrowser
+        c = _SETUP_GUEST.get('ctl')
+        if c is None:
+            raise RuntimeError('guest-cdp: SetupController 未记录,无法定位 guest server')
+        return GuestBrowser(c.vm_ip, c.server_port)
+
+
+def sync_playwright():
+    return _GuestPWSetup()

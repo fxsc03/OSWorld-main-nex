@@ -621,90 +621,13 @@ def get_page_info(env, config: Dict[str, str]):
 
 
 def get_open_tabs_info(env, config: Dict[str, str]):
-    host = env.vm_ip
-    port = env.chromium_port  # fixme: this port is hard-coded, need to be changed from config file
-    server_port = env.server_port
-
-    remote_debugging_url = f"http://{host}:{port}"
-    
-    # Configuration for retry and timeout
-    max_retries = 2
-    timeout_ms = 30000  # 30 seconds for tab info
-    
-    for attempt in range(max_retries):
-        try:
-            logger.info(f"[OPEN_TABS_INFO] Attempt {attempt + 1}/{max_retries}")
-            
-            with sync_playwright() as p:
-                # connect to remote Chrome instance
-                try:
-                    browser = p.chromium.connect_over_cdp(remote_debugging_url)
-                    logger.info(f"[OPEN_TABS_INFO] Successfully connected to existing Chrome instance")
-                except Exception as e:
-                    logger.warning(f"[OPEN_TABS_INFO] Failed to connect to existing Chrome instance: {e}")
-                    # If the connection fails, start a new browser instance
-                    platform.machine()
-                    if "arm" in platform.machine():
-                        # start a new browser instance if the connection fails
-                        payload = json.dumps({"command": [
-                            "chromium",
-                            "--remote-debugging-port=1337"
-                        ], "shell": False})
-                    else:
-                        payload = json.dumps({"command": [
-                            "google-chrome",
-                            "--remote-debugging-port=1337"
-                        ], "shell": False})
-
-                    headers = {"Content-Type": "application/json"}
-                    requests.post(f"http://{host}:{server_port}/setup/launch", headers=headers, data=payload)
-                    time.sleep(5)
-                    try:
-                        browser = p.chromium.connect_over_cdp(remote_debugging_url)
-                        logger.info(f"[OPEN_TABS_INFO] Successfully connected to new Chrome instance")
-                    except Exception as e:
-                        logger.error(f"[OPEN_TABS_INFO] Failed to connect to new Chrome instance: {e}")
-                        return []
-
-                tabs_info = []
-                for context in browser.contexts:
-                    for page in context.pages:
-                        try:
-                            # Set timeout for each page
-                            page.set_default_timeout(timeout_ms)
-                            
-                            # Wait for the page to finish loading, this prevents the "execution context was destroyed" issue
-                            page.wait_for_load_state('networkidle', timeout=timeout_ms)  # Wait for the 'load' event to complete
-                            title = page.title()
-                            url = page.url
-                            tabs_info.append({'title': title, 'url': url})
-                            logger.info(f"[OPEN_TABS_INFO] Tab info: '{title}' -> {url}")
-                        except TimeoutError:
-                            # If page loading times out, catch the exception and store the current information in the list
-                            logger.warning(f"[OPEN_TABS_INFO] Tab load timeout for URL: {page.url}")
-                            tabs_info.append({'title': 'Load timeout', 'url': page.url})
-                        except Exception as e:
-                            # Catch other potential exceptions that might occur while reading the page title
-                            logger.error(f'[OPEN_TABS_INFO] Error reading tab info: {e}')
-                            tabs_info.append({'title': 'Error encountered', 'url': page.url})
-
-                browser.close()
-                logger.info(f"[OPEN_TABS_INFO] Successfully retrieved info for {len(tabs_info)} tabs")
-                return tabs_info
-                
-        except Exception as e:
-            logger.error(f"[OPEN_TABS_INFO] Attempt {attempt + 1} failed: {str(e)}")
-            logger.error(f"[OPEN_TABS_INFO] Exception type: {type(e).__name__}")
-            
-            if attempt < max_retries - 1:
-                logger.info(f"[OPEN_TABS_INFO] Retrying in 3 seconds...")
-                time.sleep(3)
-            else:
-                logger.error(f"[OPEN_TABS_INFO] All {max_retries} attempts failed. Returning empty list.")
-                return []
-
-    # This should never be reached, but just in case
-    return []
+    """[guest-cdp] 失败直接抛,不返回 [] 避免假 0 分。"""
+    from desktop_env.providers.nex.guest_cdp import run_cdp
+    body = """RESULT = [{'title': t.get('title'), 'url': t.get('url')} for t in tabs()]
+"""
+    r = run_cdp(env.vm_ip, env.server_port, body)
+    logger.info("[guest-cdp] open_tabs_info -> %s", r)
+    return r
 
 
 def get_active_url_from_accessTree(env, config):
@@ -779,93 +702,29 @@ def get_active_url_from_accessTree(env, config):
 
 
 def get_active_tab_info(env, config: Dict[str, str]):
-    """
-    This function is used to get all info about active tab.
-    Warning! This function will reload the target-url page
-    If the tartget url has cache or cookie, this function may reload to another page.
-    If you have tested the url will not pop up to another page (check in incongnito mode yourself first),
-    you can use this function.
-    config: Dict[str, str]{
-        # Keys used in get_active_url_from_accessTree: "xpath", "selectors"
-    }
-    """
-    active_tab_url = get_active_url_from_accessTree(env, config)
-    if active_tab_url is None:
-        logger.error("Failed to get the url of active tab")
-        return None
-        
-    logger.info(f"[ACTIVE_TAB_INFO] Active tab URL: {active_tab_url}")
-    
-    host = env.vm_ip
-    port = env.chromium_port  # fixme: this port is hard-coded, need to be changed from config file
-
-    remote_debugging_url = f"http://{host}:{port}"
-    
-    # Configuration for retry and timeout
-    max_retries = 2
-    timeout_ms = 60000  # 60 seconds for active tab
-    
-    for attempt in range(max_retries):
+    """[guest-cdp] 取当前可见标签页的 title/url/content。失败直接抛。"""
+    from desktop_env.providers.nex.guest_cdp import run_cdp
+    body = """ts = tabs()
+if not ts:
+    RESULT = None
+else:
+    cur = ts[-1]
+    for q in ts:
         try:
-            logger.info(f"[ACTIVE_TAB_INFO] Attempt {attempt + 1}/{max_retries}")
-            
-            with sync_playwright() as p:
-                # connect to remote Chrome instance, since it is supposed to be the active one, we won't start a new one if failed
-                try:
-                    browser = p.chromium.connect_over_cdp(remote_debugging_url)
-                    logger.info(f"[ACTIVE_TAB_INFO] Successfully connected to Chrome instance")
-                except Exception as e:
-                    logger.error(f"[ACTIVE_TAB_INFO] Failed to connect to Chrome instance: {e}")
-                    return None
-
-                active_tab_info = {}
-                # go to the target URL page
-                page = browser.new_page()
-                
-                # Set longer timeout for navigation
-                page.set_default_timeout(timeout_ms)
-                
-                try:
-                    logger.info(f"[ACTIVE_TAB_INFO] Navigating to URL: {active_tab_url}")
-                    page.goto(active_tab_url, wait_until='networkidle', timeout=timeout_ms)
-                    page.wait_for_load_state('networkidle', timeout=timeout_ms)  # Wait for the 'load' event to complete
-                    
-                    active_tab_info = {
-                        'title': page.title(),
-                        'url': page.url,
-                        'content': page.content()  # get the HTML content of the page
-                    }
-                    
-                    logger.info(f"[ACTIVE_TAB_INFO] Successfully loaded page. Title: '{active_tab_info['title']}'")
-                    logger.info(f"[ACTIVE_TAB_INFO] Current URL: '{active_tab_info['url']}'")
-                    
-                except TimeoutError:
-                    logger.warning(f"[ACTIVE_TAB_INFO] Page load timeout for URL: {active_tab_url}")
-                    active_tab_info = {
-                        'title': 'Load timeout',
-                        'url': page.url,
-                        'content': page.content()
-                    }
-                except Exception as e:
-                    logger.error(f"[ACTIVE_TAB_INFO] Failed to go to the target URL page: {e}")
-                    return None
-
-                browser.close()
-                return active_tab_info
-                
-        except Exception as e:
-            logger.error(f"[ACTIVE_TAB_INFO] Attempt {attempt + 1} failed: {str(e)}")
-            logger.error(f"[ACTIVE_TAB_INFO] Exception type: {type(e).__name__}")
-            
-            if attempt < max_retries - 1:
-                logger.info(f"[ACTIVE_TAB_INFO] Retrying in 3 seconds...")
-                time.sleep(3)
-            else:
-                logger.error(f"[ACTIVE_TAB_INFO] All {max_retries} attempts failed.")
-                return None
-
-    # This should never be reached, but just in case
-    return None
+            if evaluate(q, 'document.visibilityState') == 'visible':
+                cur = q
+                break
+        except Exception:
+            pass
+    try:
+        html = evaluate(cur, 'document.documentElement.outerHTML')
+    except Exception:
+        html = ''
+    RESULT = {'title': cur.get('title'), 'url': cur.get('url'), 'content': html or ''}
+"""
+    r = run_cdp(env.vm_ip, env.server_port, body)
+    logger.info("[guest-cdp] active_tab_info -> %s", (r or {}).get('url') if isinstance(r, dict) else r)
+    return r
 
 
 def get_pdf_from_url(env, config: Dict[str, str]) -> str:
@@ -2399,3 +2258,35 @@ def get_url_path_parse(env, config: Dict[str, str]):
     This function name is kept for existing configurations that still use "url_path_parse" type.
     """
     return get_macys_product_url_parse(env, config)
+# ================= guest-cdp 接管 (2026-08-22) =================
+# 从宿主机 connect_over_cdp 经 nex 网关必被 Chrome 的 DNS-rebinding 防护拒绝。
+# 这里把本模块的 sync_playwright() 换成 guest 支撑的假对象,上面所有
+# getter 的提取逻辑一行不改 —— 避免逐行翻译带来静默的分数偏差。
+# 缺失的 API(如 page.pdf)会招 AttributeError 而不是默默返回空值。
+_GUEST_CUR = {}
+class _GuestPW:
+    def __enter__(self): return self
+    def __exit__(self, *a): return False
+    def start(self): return self
+    def stop(self): pass
+    @property
+    def chromium(self): return self
+    def connect_over_cdp(self, url=None, **kw):
+        from desktop_env.providers.nex.guest_page import GuestBrowser
+        e = _GUEST_CUR.get('env')
+        if e is None:
+            raise RuntimeError('guest-cdp: 当前 env 未知,无法定位 guest server')
+        return GuestBrowser(e.vm_ip, e.server_port)
+def sync_playwright():
+    return _GuestPW()
+def _guest_bind_env(fn):
+    import functools
+    @functools.wraps(fn)
+    def w(env, *a, **kw):
+        _GUEST_CUR['env'] = env
+        return fn(env, *a, **kw)
+    return w
+for _n in [k for k in list(globals()) if k.startswith('get_')]:
+    _f = globals()[_n]
+    if callable(_f) and getattr(_f, '__module__', '') == __name__:
+        globals()[_n] = _guest_bind_env(_f)

@@ -91,7 +91,7 @@ def template_id() -> str:
 NETWORK_EGRESS = os.environ.get("NEX_EGRESS_ACTION", "allow")  # allow | deny
 
 
-def create_sandbox(timeout: int = None) -> str:
+def _create_sandbox_once(timeout: int = None) -> str:
     payload = {
         "template_id": template_id(),
         "timeout": timeout or SANDBOX_TIMEOUT,
@@ -125,7 +125,7 @@ def renew(sandbox_id: str, duration: int = None):
              json={"timeout": duration or SANDBOX_TIMEOUT})
 
 
-def delete_sandbox(sandbox_id: str):
+def _delete_sandbox_once(sandbox_id: str):
     try:
         _request("DELETE", f"{_instances_base()}/{sandbox_id}")
         logger.info(f"deleted sandbox {sandbox_id}")
@@ -166,3 +166,97 @@ def wait_guest_ready(server_endpoint_host: str, timeout: int = 600, min_bytes: i
             pass
         time.sleep(5)
     raise TimeoutError(f"guest desktop not rendered within {timeout}s ({url}, min_bytes={min_bytes})")
+# ======================= quota guard (2026-08-22) =======================
+# 并发下的配额死锁修复：
+#   1) DELETE 是异步的，接口 33ms 就返回，pod 还在 Terminating，仍占 4C/8Gi。
+#      旧实现发完就走，下一个 create 撞上 12 > 10 核 -> 422。现在等到真的释放才返回。
+#   2) create 撞到 422/quota 时指数退避重试，而不是直接抛。
+_DELETE_WAIT        = float(os.environ.get("NEX_DELETE_WAIT", "180"))
+_DELETE_POLL        = float(os.environ.get("NEX_DELETE_POLL", "1.0"))
+_DELETE_SETTLE      = float(os.environ.get("NEX_DELETE_SETTLE", "2.0"))
+_CREATE_ATTEMPTS    = int(os.environ.get("NEX_CREATE_ATTEMPTS", "12"))
+_CREATE_BACKOFF     = float(os.environ.get("NEX_CREATE_BACKOFF", "3.0"))
+_CREATE_BACKOFF_MAX = float(os.environ.get("NEX_CREATE_BACKOFF_MAX", "30.0"))
+_GONE_STATES = {"terminated", "deleted", "stopped", "failed", "error", "killed", ""}
+def _is_gone(sandbox_id: str) -> bool:
+    try:
+        st = (get_state(sandbox_id) or "").strip().lower()
+    except Exception as e:
+        s = str(e).lower()
+        if "404" in s or "not found" in s or "not exist" in s:
+            return True
+        raise
+    return st in _GONE_STATES
+def _wait_gone(sandbox_id: str, timeout: float = None) -> bool:
+    timeout = _DELETE_WAIT if timeout is None else timeout
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            if _is_gone(sandbox_id):
+                return True
+        except Exception as e:
+            logger.warning(f"[quota-guard] 查 {sandbox_id} 状态失败,当已释放: {str(e)[:120]}")
+            return True
+        time.sleep(_DELETE_POLL)
+    logger.warning(f"[quota-guard] 等 {sandbox_id} 终止超时 ({timeout}s),继续")
+    return False
+def delete_sandbox(sandbox_id: str):
+    """删除，并等到 pod 真的释放配额再返回。"""
+    _delete_sandbox_once(sandbox_id)
+    t0 = time.time()
+    ok = _wait_gone(sandbox_id)
+    time.sleep(_DELETE_SETTLE)  # 接口立刻 404,看不到 Terminating,只能静置
+    logger.info(f"[quota-guard] {sandbox_id} 释放确认={ok} 耗时={time.time()-t0:.1f}s")
+def _is_quota_error(e: Exception) -> bool:
+    s = str(e).lower()
+    return ("422" in s) or ("quota" in s)
+def create_sandbox(timeout: int = None) -> str:
+    """撞到配额 422 时退避重试，而不是把任务烧成 setup 失败。"""
+    delay, last = _CREATE_BACKOFF, None
+    for i in range(1, _CREATE_ATTEMPTS + 1):
+        try:
+            return _create_sandbox_once(timeout)
+        except Exception as e:
+            last = e
+            if not _is_quota_error(e):
+                raise
+            logger.warning(f"[quota-guard] create 第 {i}/{_CREATE_ATTEMPTS} 次撞配额,{delay:.0f}s 后重试: {str(e)[:140]}")
+            time.sleep(delay)
+            delay = min(delay * 1.6, _CREATE_BACKOFF_MAX)
+    raise RuntimeError(f"[quota-guard] create 连续 {_CREATE_ATTEMPTS} 次配额失败: {last}")
+def list_sandboxes() -> list:
+    d = _request("GET", _instances_base(), params={"page_size": 100})
+    items = d.get("items") if isinstance(d, dict) else d
+    return items or []
+def sweep_orphans(keep=()) -> int:
+    """开跑前清掉上一轮残留的沙箱。只在主进程启动时调,不要在 worker 里调。"""
+    keep, n = set(keep or ()), 0
+    try: items = list_sandboxes()
+    except Exception as e:
+        logger.warning(f"[quota-guard] 列沙箱失败,跳过清理: {e}"); return 0
+    for it in items:
+        sid = (it.get("sandbox_id") or it.get("id") or "") if isinstance(it, dict) else str(it)
+        if not sid or sid in keep: continue
+        try:
+            _delete_sandbox_once(sid); n += 1; logger.warning(f"[quota-guard] 清理残留沙箱 {sid}")
+        except Exception as e: logger.warning(f"[quota-guard] 清理 {sid} 失败: {e}")
+    if n: time.sleep(_DELETE_SETTLE)
+    return n
+import fcntl as _fcntl
+_LOCK_PATH = os.environ.get("NEX_CREATE_LOCK", "/tmp/nex_create.lock")
+_create_sandbox_unlocked = create_sandbox
+def create_sandbox(timeout: int = None) -> str:
+    """跨进程串行化创建。
+    两个 worker 同时 delete→create 时,两个正在终止的 pod 加两个新建
+    瞬时需要 4 个槽位,而配额上限是 3 —— 退避重试也抢不过彼此。
+    加锁让创建排队,同一时刻只有一个在抢槽位。"""
+    t0 = time.time()
+    with open(_LOCK_PATH, "a+") as fh:
+        _fcntl.flock(fh, _fcntl.LOCK_EX)
+        w = time.time() - t0
+        if w > 1:
+            logger.info("[quota-guard] 等创建锁 %.1fs", w)
+        try:
+            return _create_sandbox_unlocked(timeout)
+        finally:
+            _fcntl.flock(fh, _fcntl.LOCK_UN)

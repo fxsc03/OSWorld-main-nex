@@ -350,9 +350,13 @@ print(output);"""
 import os, subprocess, time
 os.environ.setdefault("DISPLAY", ":0")
 try:
-    subprocess.run(["xdotool", "key", "Escape"], capture_output=True, timeout=5)
+    import pyautogui
+    pyautogui.press("escape")
 except Exception:
-    pass
+    try:
+        subprocess.run(["xdotool", "key", "Escape"], capture_output=True, timeout=5)
+    except Exception:
+        pass
 ids = []
 try:
     out = subprocess.run(["wmctrl", "-lx"], capture_output=True, text=True, timeout=15).stdout
