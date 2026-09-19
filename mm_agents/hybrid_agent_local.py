@@ -146,6 +146,48 @@ def _registry_tool_to_qwen_function(tool: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+
+def _summarize_action(parsed_action) -> str:
+    """One-line description of the executed tool call, used for the
+    Previous-actions history when the model emitted no <conclusion>
+    (the baseline context policy never asks for one). Without this every
+    step older than the image window collapses to "(action taken)" and the
+    model cannot see that it is repeating itself.
+    parsed_action is the dict built in predict(): action_type "gui" carries
+    raw_action_type/raw_action_inputs, "mcp" carries tool_name/params."""
+    import json as _json
+    try:
+        if not isinstance(parsed_action, dict):
+            return "(action taken)"
+        at = str(parsed_action.get("action_type") or "unknown")
+        if parsed_action.get("parse_failed") or at == "parse_failed":
+            return "(unparseable response, nothing executed)"
+        if at == "gui":
+            name = str(parsed_action.get("raw_action_type") or "gui")
+            inputs = parsed_action.get("raw_action_inputs") or {}
+        elif at == "mcp":
+            name = str(parsed_action.get("tool_name") or "mcp")
+            inputs = parsed_action.get("params") or {}
+        else:  # owl_parser-style dict
+            name = at
+            inputs = parsed_action.get("action_inputs") or {}
+        if name == "finished":
+            return "terminate(status=success)"
+        if name == "fail":
+            return "terminate(status=failure)"
+        parts = []
+        if isinstance(inputs, dict):
+            for k, v in inputs.items():
+                s = v if isinstance(v, str) else _json.dumps(v, ensure_ascii=False)
+                s = s.replace("\n", " ")
+                if len(s) > 60:
+                    s = s[:57] + "..."
+                parts.append(f"{k}={s}")
+        line = name + "(" + ", ".join(parts) + ")"
+        return line if len(line) <= 160 else line[:157] + "..."
+    except Exception:
+        return "(action taken)"
+
 class HybridAgentLocal(Qwen3VLAgentLocal):
     """Hybrid GUI+MCP agent (owl-style NousFnCall protocol)."""
 
@@ -508,7 +550,9 @@ class HybridAgentLocal(Qwen3VLAgentLocal):
         # owl_parser.parse_action_fncall_id already falls back to thought when
         # conclusion is empty (owl_parser.py:43-44); double-truncating to 200
         # chars here just produces incoherent history snippets.
-        self._history_conclusions.append(parsed_action.get("conclusion", "").strip())
+        _c = (parsed_action.get("conclusion", "") or "").strip()
+        # Fallback: executed action string instead of "(action taken)" (2026-09-05).
+        self._history_conclusions.append(_c if _c else _summarize_action(parsed_action))
         # Record app_info (active window title) for next step's prompt — model
         # uses this to identify current file / sheet / slide context.
         self._history_app_infos.append((obs.get("app_info") if isinstance(obs, dict) else None) or "")
