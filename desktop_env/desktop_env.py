@@ -582,25 +582,18 @@ except Exception:
     # same VM-side path (no rebuilds in lib_run_single.py).
     # ────────────────────────────────────────────────────────────────────
 
-    # Source-of-truth files on host for VM injection (the QCOW2 in this repo
-    # ships with empty stubs — the same situation OSWorld-MCP handles by
-    # injecting at runtime in desktop_env._inject_mcp_files).
-    # Override via env var MCP_SRC_ROOT (e.g. to swap in ToolCUA's patched
-    # mcp_server for ablation). Both layouts must expose `{root}/mcp/` with
-    # `mcp_server/` and `osworld_mcp_client.py` underneath.
+    # Bundled source for guest injection; the root must contain mcp/.
+    # Set MCP_SRC_ROOT before import to use a compatible alternate source tree.
     _MCP_SRC_ROOT = os.environ.get(
         "MCP_SRC_ROOT",
-        "/mnt/tidal-alsh-share2/dataset/fansiqi1/OSWorld-MCP",
+        os.path.abspath(os.path.join(os.path.dirname(__file__), "..")),
     )
 
     def _mcp_enabled(self):
         """Whether the MCP path is worth running on this host.
 
-        MCP is not part of upstream OSWorld; it was ported in from
-        OSWorld-MCP. When _MCP_SRC_ROOT is not mounted here it can never
-        start, and every task then burns ~74s on the readiness timeout plus
-        ~3.4s per step on get_mcp_tool_list -- while tool_list is read by no
-        agent in this repo. So default to autodetecting the source tree.
+        Autodetect the bundled source tree. The guest image must separately
+        provide the MCP runtime and desktop application dependencies.
         Overrides: OSWORLD_DISABLE_MCP=1 forces off (use for A/B),
                    OSWORLD_FORCE_MCP=1 forces on.
         """

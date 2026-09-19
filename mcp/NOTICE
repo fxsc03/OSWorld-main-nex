@@ -1,0 +1,13 @@
+Bundled OSWorld MCP server and tools
+
+Source: the existing toolcua_mcp_swap/mcp tree, derived from the
+hybrid-routing-agent mcp_tools/mcp distribution with local server result
+normalization changes.
+
+Attribution retained from that distribution:
+Derived from OSWorld-MCP (https://github.com/xlang-ai/OSWorld), Apache-2.0,
+extended with the project's own tools (the *_ours and *_ljt packages).
+Redistributed under Apache-2.0; retains OSWorld-MCP's terms.
+
+Copyright 2026 The hybrid-routing-agent authors.
+See ../LICENSE for the Apache License, Version 2.0.

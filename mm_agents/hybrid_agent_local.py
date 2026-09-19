@@ -40,10 +40,11 @@ from mm_agents.owl_parser import parse_action_fncall_id, parsing_response_to_pya
 from mm_agents.agent_function_call import ComputerUse
 from mm_agents.coordinate_resize import update_image_size_
 
-# Add repo root to path so `agents`, `prompts`, `environment` are importable
-_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
-if _REPO_ROOT not in sys.path:
-    sys.path.insert(0, _REPO_ROOT)
+# Resolve the bundled retriever, prompts, and registry from this checkout.
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+if _REPO_ROOT in sys.path:
+    sys.path.remove(_REPO_ROOT)
+sys.path.insert(0, _REPO_ROOT)
 
 from agents.tool_retriever import ToolRetriever
 from prompts.policy_hybrid import build_system_text, build_user_prompt_text

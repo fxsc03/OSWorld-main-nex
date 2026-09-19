@@ -39,18 +39,524 @@
 - 2024-06-15: We refactor the code of environment part to decompose VMware Integration, and start to support other platforms such as VirtualBox, AWS, Azure, etc. Hold tight!
 - 2024-04-11: We released our [paper](https://arxiv.org/abs/2404.07972), [environment and benchmark](https://github.com/xlang-ai/OSWorld), and [project page](https://os-world.github.io/). Check it out!
 
-## 💾 Installation
+## Nex + Relax integration
+
+This checkout is the Nex-enabled OSWorld fork used by the Relax OSWorld
+agentic training recipe. Use this repository instead of the upstream
+`xlang-ai/OSWorld` checkout when the training environment must create Nex
+sandboxes and expose OSWorld MCP tools to a Relax-managed agent.
+
+The integration has two layers:
+
+```text
+Relax agentic rollout
+    ├── starts one agent process per session
+    ├── serves the model through /v1/chat/completions
+    └── consumes evaluator rewards and per-turn trajectory exports
+             |
+             v
+OSWorld-main-nex (this repository)
+    ├── creates and releases the Nex sandbox
+    ├── resets the OSWorld task and injects MCP files
+    ├── exposes screenshots, pyautogui, MCP, and evaluator APIs
+    └── runs HybridAgentLocal's prompt and action parsing
+```
+
+The only code that changes the LLM destination is Relax's adapter
+`examples/osworld_agentic/app/hybrid_agent.py`. It subclasses this fork's
+`mm_agents.hybrid_agent_local.HybridAgentLocal` and sends each request to
+Relax's OpenAI-compatible endpoint. This repository remains responsible for
+the desktop environment and the agent's GUI/MCP action protocol; it does not
+contain Relax's trainer.
+
+### Sandbox platform support
+
+The supplied Relax recipe defaults to **Nex**. The model runs through Relax;
+Nex provides the desktop sandbox. The request flow is:
+
+```text
+Relax session -> OSWorldEnv -> DesktopEnv -> Nex provider -> Nex REST API
+                                  |                         (create/renew/delete)
+                                  +-> guest OSWorld HTTP server (:5000)
+                                         +-> desktop / evaluator
+                                         +-> MCP client -> FastMCP (:9292)
+```
+
+`NEX_API_BASE` is the platform control-plane base URL including `/api/v1`.
+The client authenticates with `x-api-key`, creates an instance through
+`POST /workspaces/{workspace}/sandbox/instances`, discovers each guest port
+through `GET .../instances/{id}/endpoint?port=N`, renews the instance through
+`POST .../instances/{id}/renew`, and deletes it on normal close. A Nex reset
+recreates the instance from `NEX_TEMPLATE` (or `NEX_TEMPLATE_ID`);
+`snapshot_name` does not select the Nex template.
+
+The provider forwards guest ports 5000 (OSWorld), 9222 (Chromium CDP),
+8006 (VNC), and 8080 (VLC) through local proxies. MCP calls run inside the
+guest through the OSWorld execute API, so port 9292 does not need another
+public Nex endpoint. The guest image must already contain the desktop,
+OSWorld HTTP server, applications, and MCP dependencies; see [MCP setup](mcp/README.md).
+
+Other platforms can use the same Relax model and training integration:
+
+| Platform | Required work |
+| --- | --- |
+| Nex | Configure API URL, key, workspace, template, networking, and quota; run the supplied smoke checks. |
+| Existing OSWorld providers: `vmware`, `virtualbox`, `docker`, `aws`, `azure`, `aliyun`, `volcengine` | Prepare the provider's VM/image, credentials and networking; set `provider_name` and `snapshot_name` in Relax's `examples/osworld_agentic/app/osworld_config.yaml`; validate its desktop and MCP behavior. |
+| A new sandbox API | Implement `Provider` and `VMManager` under `desktop_env/providers/<name>/`, register them in `desktop_env/providers/__init__.py`, and add the name to the appropriate clean/dirty provider set in `DesktopEnv`. |
+
+For a new provider, implement creation/allocation, readiness and reachable guest
+endpoints, reset, shutdown, and any TTL renewal required by that platform.
+Follow the `Provider`/`VMManager` interfaces in `desktop_env/providers/base.py`.
+The guest must support OSWorld screenshots, command execution, file upload,
+task setup and evaluation, plus the MCP runtime for hybrid actions.
+
+Relax already reads `provider_name` from YAML. Its current wrapper does not
+forward provider-specific options such as `region`, `path_to_vm`, or
+`client_password`. If the selected provider needs these, extend the config
+flow through `app/agent.py` and `app/env_osworld.py` to `DesktopEnv` in Relax.
+Changing `NEX_API_BASE` alone only works for a service implementing the same
+Nex API contract. Other providers are not validated by the Nex smoke scripts;
+check create/reset/screenshot/step/evaluate/close, then MCP list/call, then a
+small Relax run before scaling concurrency.
+
+For GUI-only use, set `OSWORLD_DISABLE_MCP=1`. In the supplied Relax training
+script, edit the runtime environment block to set that flag to `1` and
+`OSWORLD_FORCE_MCP` to `0`, and keep `env.local.sh` consistent. That block
+currently fixes them to `0` and `1`, so a shell export alone is insufficient.
+
+### Which OSWorld repository to use
+
+Clone the Nex fork, not the upstream repository:
+
+```bash
+git clone https://github.com/fxsc03/OSWorld-main-nex.git
+cd OSWorld-main-nex
+git checkout main
+```
+
+The checkout must contain all of the following paths:
+
+```text
+desktop_env/providers/nex/
+desktop_env/providers/nex/client.py
+desktop_env/providers/nex/provider.py
+mm_agents/hybrid_agent_local.py
+agents/tool_retriever.py
+prompts/policy_hybrid.py
+tools/tools_registry.json
+mcp/osworld_mcp_client.py
+mcp/mcp_server/server.py
+mcp/README.md
+nex_env_check.py
+nex_task_smoke.py
+nex_mcp_smoke.py
+```
+
+Do not replace this checkout with a PyPI `desktop-env` package or a plain
+upstream OSWorld clone. Those versions may not have the Nex provider, MCP
+injection, or the `HybridAgentLocal` implementation expected by Relax.
+The `agents/`, `prompts/`, and `tools/` directories are included in this
+fork; users do not need to copy those directories from a separate agent
+repository.
+
+### End-to-end clone and environment setup
+
+The runnable training setup uses this Nex OSWorld fork together with the
+Relax branch that contains `examples/osworld_agentic/`. Replace
+`<RELAX_REPO_URL>` with the Relax Git URL available to your organization:
+
+```bash
+mkdir -p /work
+cd /work
+
+git clone https://github.com/fxsc03/OSWorld-main-nex.git OSWorld-main-nex
+git clone <RELAX_REPO_URL> Relax
+cd Relax
+git checkout feat/fengxiaoshi/osworld
+cd /work
+```
+
+The MCP source is included in this repository under `mcp/`; no separate
+`toolcua_mcp_swap` download is required. The training machine also needs the
+Qwen3-VL checkpoint, Megatron-LM source, and an existing Ray cluster.
+
+First prepare the GPU training environment using the cloned Relax repository's
+`docs/en/guide/installation.md` (or `docs/zh/guide/installation.md`). PyTorch,
+Megatron, SGLang and their CUDA dependencies must already be compatible.
+In that environment, install the application dependencies on every Ray node:
+
+```bash
+python -m pip install -r /work/Relax/requirements.txt
+python -m pip install -r /work/OSWorld-main-nex/requirements.txt qwen-agent
+```
+
+The managed agent uses the Ray worker's `python`. Activating a venv only on
+the submission machine does not change an already running remote worker's
+interpreter. These pip commands alone do not build the GPU training stack.
+
+Check the two repository imports before using Nex:
+
+```bash
+cd /work/OSWorld-main-nex
+python -c "from mm_agents.hybrid_agent_local import HybridAgentLocal; print('HybridAgentLocal OK')"
+python nex_env_check.py
+```
+
+Configure the Nex and shared paths in the shell that will submit the Ray job:
+
+```bash
+export OSWORLD_REPO=/work/OSWorld-main-nex
+export MCP_SRC_ROOT=/work/OSWorld-main-nex
+export NEX_API_BASE="http://<your-nex-api-host>/api/v1"
+export NEX_API_KEY="ak-<your-key>"
+export NEX_WORKSPACE_ID="workspace-<your-workspace>"
+export NEX_TEMPLATE="osworld-guest"
+```
+
+Run the Nex lifecycle checks before a training job. The task and MCP smoke
+tests create real sandboxes and consume Nex quota:
+
+```bash
+cd /work/OSWorld-main-nex
+python nex_task_smoke.py \
+    --task evaluation_examples/examples/libreoffice_calc/1954cced-e748-45c4-9c26-9855b97fbc5e.json
+python nex_mcp_smoke.py \
+    --task evaluation_examples/examples/libreoffice_calc/1954cced-e748-45c4-9c26-9855b97fbc5e.json
+```
+
+After these checks pass, continue with the Relax recipe. Its environment file
+must point `OSWORLD_REPO` and `MCP_SRC_ROOT` to `/work/OSWorld-main-nex`, where
+the bundled `mcp/` directory is located, and `MODEL_DIR` to the Qwen3-VL checkpoint. The final command
+is run from the Relax checkout:
+
+```bash
+cd /work/Relax
+printf '%s\n' '/examples/osworld_agentic/env.local.sh' >> "$(git rev-parse --git-path info/exclude)"
+cp -n examples/osworld_agentic/env.sh examples/osworld_agentic/env.local.sh
+# Edit env.local.sh: MEGATRON, MODEL_DIR, DATA_DIR, SAVE_DIR, RAY_JOB_ADDRESS,
+# OSWORLD_REPO, MCP_SRC_ROOT, NEX_API_BASE, NEX_API_KEY, NEX_WORKSPACE_ID,
+# and NEX_TEMPLATE.
+source examples/osworld_agentic/env.local.sh
+source examples/osworld_agentic/env.sh
+python examples/osworld_agentic/scripts/prepare_data.py \
+    --input-dir "${OSWORLD_REPO}/evaluation_examples" \
+    --output-dir "${DATA_DIR}/osworld" \
+    --train-manifest examples/osworld_agentic/scripts/train_tasks.txt \
+    --eval-manifest examples/osworld_agentic/scripts/train_tasks.txt
+bash examples/osworld_agentic/run_qwen3vl_8B_osworld_outcome.sh
+```
+
+Keep the API key in the ignored `env.local.sh` or another private credential
+file. Do not put it in this README, a committed `.env`, parquet data, or the
+Ray runtime environment JSON.
+
+### Nex credentials and API settings
+
+The Nex client is centralized in
+`desktop_env/providers/nex/client.py`. It uses the Nex REST API with an
+`x-api-key` header; it does not use a Bearer token. Configure these variables
+in the shell that starts OSWorld or in a private `.env`/`env.local.sh` file:
+
+| Variable | Required | Meaning |
+| --- | --- | --- |
+| `NEX_API_KEY` | Yes | Your Nex API key, normally in the `ak-...` form. |
+| `NEX_TEMPLATE` | Yes unless `NEX_TEMPLATE_ID` is set | Name of the Nex sandbox template, for example `osworld-guest`. |
+| `NEX_TEMPLATE_ID` | Alternative | Template ID; takes precedence over `NEX_TEMPLATE`. |
+| `NEX_WORKSPACE_ID` | Recommended | Workspace that owns the template and sandbox quota. If omitted, the client resolves it from `/api-keys/current`. |
+| `NEX_API_BASE` | Usually no | Nex API base URL, including `/api/v1`. The code default is `http://nex.devops.xiaohongshu.com/api/v1`; use the address provided by your Nex deployment if it differs. |
+| `NEX_SANDBOX_TIMEOUT` | No | Sandbox TTL in seconds. Default: `3600`; the provider renews active sandboxes. |
+| `NEX_EGRESS_ACTION` | No | Sandbox egress policy, default `allow`. Set it according to your workspace policy. |
+
+Example configuration with placeholders:
+
+```bash
+export NEX_API_BASE="http://<your-nex-api-host>/api/v1"
+export NEX_API_KEY="ak-<your-key>"
+export NEX_WORKSPACE_ID="workspace-<your-workspace>"
+export NEX_TEMPLATE="osworld-guest"
+export NEX_SANDBOX_TIMEOUT=3600
+```
+
+The value of `NEX_API_BASE` is the control-plane URL used for workspace,
+template, create, renew, and delete requests. It is not the guest desktop
+URL. Guest endpoints are discovered after sandbox creation, one per guest
+port, by the provider. Never put a real API key in this README, a committed
+`.env` file, a parquet file, or a Ray runtime environment JSON.
+
+The workspace must have permission to use the selected template and enough
+quota for the requested number of concurrent sandboxes. A training run with
+`ROLLOUT_BATCH_SIZE=12` and `N_SAMPLES_PER_PROMPT=8` can request many sessions;
+the Nex quota, rather than GPU count, is often the first concurrency limit.
+Account for all sessions per group when sizing quota (the default round has
+12 × 8 = 96 sessions). Relax's `OSWORLD_MAX_CONCURRENT_GROUPS` limits local
+task groups via host-local locks; it is not a cluster-wide sandbox quota.
+Adjust that value in the training script's runtime environment block together
+with batch size and samples per prompt.
+
+### Python environment and MCP source
+
+For standalone OSWorld checks, a dedicated Python 3.12 environment can be
+used as below. For Relax training, install these dependencies in the prepared
+Ray worker training environment described above. The dependency file
+contains important NumPy 1.x compatibility pins for OpenCV, Gymnasium, and
+the evaluator stack:
+
+```bash
+cd /path/to/OSWorld-main-nex
+python3.12 -m venv .venv
+source .venv/bin/activate
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+# Required by mm_agents/agent_function_call.py (used by HybridAgentLocal).
+python -m pip install qwen-agent
+```
+
+The environment check should be clean before starting a sandbox:
+
+```bash
+python nex_env_check.py
+```
+
+In particular, do not let pip upgrade NumPy to 2.x while using the pinned
+OpenCV/evaluator wheels. An `_ARRAY_API not found` or `numpy.core.multiarray`
+error means the environment is inconsistent; reinstall the requirements in a
+fresh environment before debugging Nex.
+
+Verify the HybridAgentLocal import before starting Relax:
+
+```bash
+python -c "from mm_agents.hybrid_agent_local import HybridAgentLocal; from agents.tool_retriever import ToolRetriever; print('HybridAgentLocal dependencies OK')"
+```
+
+`HybridAgentLocal` has three kinds of dependencies. The Python packages come
+from `requirements.txt` plus `qwen-agent`; the prompt, BM25 retriever, tool
+registry, and MCP server source are shipped in this repository. The MCP source
+is injected when the guest copies are missing or empty. Existing populated
+guest files may be reused; updating this checkout does not force an already
+populated image to refresh its MCP files.
+
+MCP is loaded from the OSWorld checkout by default. `MCP_SRC_ROOT` may still
+be overridden when testing a compatible alternate MCP implementation:
+
+```text
+/work/
+├── OSWorld-main-nex/      # contains mcp/
+└── Relax/
+```
+
+```bash
+export OSWORLD_REPO=/work/OSWorld-main-nex
+export MCP_SRC_ROOT=/work/OSWorld-main-nex
+```
+
+`MCP_SRC_ROOT` points to the repository root containing `mcp/`, not to
+`mcp/` itself; the injector appends `/mcp`. Existing `env.local.sh` overrides
+must also be updated. See [MCP setup and guest dependencies](mcp/README.md).
+
+`MCP_SRC_ROOT` must be visible to every process that imports `DesktopEnv`,
+including Ray workers and the managed agent subprocess. The Relax launcher
+passes `OSWORLD_REPO` and `MCP_SRC_ROOT` into the Ray runtime environment.
+For GUI-only sessions, follow the flag settings in "Sandbox platform support"
+above, including the fixed runtime environment values in the Relax script.
+
+### Verify Nex before connecting Relax
+
+Run the checks in this order. These commands create real Nex sandboxes and
+may consume workspace quota.
+
+```bash
+cd /work/OSWorld-main-nex
+# Use the prepared Python environment.
+export NEX_API_BASE="http://<your-nex-api-host>/api/v1"
+export NEX_API_KEY="ak-<your-key>"
+export NEX_WORKSPACE_ID="workspace-<your-workspace>"
+export NEX_TEMPLATE="osworld-guest"
+export MCP_SRC_ROOT=/work/OSWorld-main-nex
+
+# 1. Import and dependency check; no sandbox is created.
+python nex_env_check.py
+
+# 2. DesktopEnv lifecycle: create, setup, screenshot, evaluate, close.
+python nex_task_smoke.py \
+    --task evaluation_examples/examples/libreoffice_calc/1954cced-e748-45c4-9c26-9855b97fbc5e.json
+
+# 3. MCP lifecycle: inject the server, list tools, call one read-only tool.
+python nex_mcp_smoke.py \
+    --task evaluation_examples/examples/libreoffice_calc/1954cced-e748-45c4-9c26-9855b97fbc5e.json
+```
+
+The first smoke test should report that setup, observation, and evaluator
+are working. A score of `0` is expected because the smoke test does not solve
+the task. The MCP smoke test should report a non-empty tool list and a
+successful read-only tool call. If either smoke test fails, fix the Nex,
+template, quota, dependency, or MCP configuration before starting Relax.
+
+### Relax-side configuration
+
+The Relax repository contains the training recipe under
+`examples/osworld_agentic/`. Copy its environment template to a private file
+and fill in both repository paths:
+
+```bash
+cd /work/Relax
+printf '%s\n' '/examples/osworld_agentic/env.local.sh' >> "$(git rev-parse --git-path info/exclude)"
+cp -n examples/osworld_agentic/env.sh examples/osworld_agentic/env.local.sh
+chmod 600 examples/osworld_agentic/env.local.sh
+```
+
+At minimum, set:
+
+```bash
+export MEGATRON=/work/Megatron-LM
+export MODEL_DIR=/work/models
+export DATA_DIR=/work/rl_data
+export SAVE_DIR=/work/checkpoints/osworld_agentic_run1
+export RAY_JOB_ADDRESS=http://<ray-head>:8265
+
+export OSWORLD_REPO=/work/OSWorld-main-nex
+export OSWORLD_CACHE_DIR=/work/OSWorld-main-nex/cache
+export MCP_SRC_ROOT=/work/OSWorld-main-nex
+
+export NEX_API_BASE="http://<your-nex-api-host>/api/v1"
+export NEX_API_KEY="ak-<your-key>"
+export NEX_WORKSPACE_ID="workspace-<your-workspace>"
+export NEX_TEMPLATE="osworld-guest"
+```
+
+The Relax recipe starts `examples/osworld_agentic/run_agent_app.sh` once per
+session. That launcher sets `PYTHONPATH` to the Relax checkout and this
+OSWorld checkout, then starts `app.agent`. The agent creates one
+`DesktopEnv(provider_name="nex")`, runs the task, and writes a session result
+that Relax consumes.
+
+The model request path is:
+
+```text
+HybridAgentLocal.call_llm()
+    -> POST ${RELAX_BASE_URL}/v1/chat/completions
+    -> Relax AgenticChatAPIService
+    -> SGLang rollout engine
+```
+
+`RELAX_BASE_URL` and `RELAX_SESSION_ID` are injected by Relax. Users should
+not point `OPENAI_BASE_URL` at the Nex API. Nex is the desktop environment;
+Relax is the model-serving endpoint for the training session.
+
+Prepare the OSWorld task parquet and start the 8-GPU example from the Relax
+repository:
+
+```bash
+cd /work/Relax
+source examples/osworld_agentic/env.local.sh
+source examples/osworld_agentic/env.sh
+
+python examples/osworld_agentic/scripts/prepare_data.py \
+    --input-dir "${OSWORLD_REPO}/evaluation_examples" \
+    --output-dir "${DATA_DIR}/osworld" \
+    --train-manifest examples/osworld_agentic/scripts/train_tasks.txt \
+    --eval-manifest examples/osworld_agentic/scripts/train_tasks.txt
+
+bash examples/osworld_agentic/run_qwen3vl_8B_osworld_outcome.sh
+```
+
+The training recipe expects the model at
+`${MODEL_DIR}/Qwen3-VL-8B-Thinking/`, a shared filesystem for Relax,
+Megatron, OSWorld, MCP, data, and model files, and a Ray cluster whose
+workers can import both repositories.
+
+### What this fork changed for Relax
+
+The Nex fork provides the environment contract that the Relax adapter needs:
+
+1. **Nex REST client** (`desktop_env/providers/nex/client.py`)
+   - Uses the Nex `x-api-key` authentication header.
+   - Resolves a workspace and template, creates sandboxes, discovers guest
+     endpoints, renews active instances, and deletes them.
+   - Retries quota-related creates with backoff, waits for asynchronous deletes
+     to release quota, and serializes concurrent creates with a file lock.
+
+2. **OSWorld Nex provider** (`desktop_env/providers/nex/provider.py`)
+   - Implements the normal OSWorld provider lifecycle on top of a Nex sandbox.
+   - Maps the guest server, Chromium CDP, VNC, and VLC ports through local
+     proxies so existing OSWorld controllers can keep using local endpoints.
+   - Treats the Nex template as the initial snapshot and recreates a sandbox
+     when OSWorld requests a reset.
+   - Renews the sandbox while a task is active and cleans up the proxies and
+     instance on close.
+
+3. **DesktopEnv Nex/MCP path** (`desktop_env/desktop_env.py`)
+   - Recognizes `provider_name="nex"` as a clean, remote environment.
+   - Bundles MCP client/server source under `mcp/` and defaults to this
+     checkout for injection. Missing/empty guest copies are populated before
+     tool discovery; the guest must supply the runtime dependencies.
+   - Returns the same screenshot, application state, tool list, `step`,
+     `call_mcp_tool`, `evaluate`, and `close` surface used by the Relax adapter.
+   - Adds Nex startup settling and desktop-error-window handling needed for a
+     reliable first observation.
+
+4. **Hybrid GUI + MCP agent** (`mm_agents/hybrid_agent_local.py`)
+   - Keeps the existing NousFnCall protocol for GUI and MCP actions.
+   - Ships the prompt builder, BM25 tool retriever, and tool registry in the
+     same OSWorld checkout, so the Relax launcher does not depend on an
+     untracked sibling `agents/`, `prompts/`, or `tools/` directory.
+   - Preserves parsed action information in trajectory history when a model
+     response has no explicit conclusion, so later turns can see the action
+     that was actually executed.
+   - Keeps the tool retriever and prompt construction inside the OSWorld
+     process; Relax only supplies the model endpoint and consumes the export.
+
+The fork deliberately does not put Ray, Relax argument parsing, reward
+shaping, or checkpoint logic into OSWorld. Those responsibilities stay in
+Relax's `examples/osworld_agentic` adapter and training entrypoint. This
+separation lets users upgrade the training recipe without turning the Nex
+provider into a Relax-specific package.
+
+### Common failure modes
+
+- **`NEX_API_KEY` or template errors**: verify the key, workspace, template
+  name, and that the key has sandbox permissions. `NEX_API_KEY` is sent as
+  `x-api-key`, not `Authorization: Bearer ...`.
+- **HTTP 422 quota errors**: lower concurrent task groups or request more Nex
+  quota. Do not increase Ray/GPU concurrency first; Nex sandbox quota is
+  independent of GPU capacity.
+- **Blank first screenshot**: wait for `nex_task_smoke.py` to finish its
+  desktop readiness check and verify the selected template has a working
+  Ubuntu desktop.
+- **MCP tool list is empty**: check that `MCP_SRC_ROOT` contains the bundled
+  `mcp/` directory, that the path is visible inside the worker process, and
+  rerun `nex_mcp_smoke.py`. Set `MCP_SRC_ROOT` only when using a compatible
+  alternate implementation.
+- **`ModuleNotFoundError: qwen_agent`**: activate the OSWorld virtual
+  environment and run `python -m pip install qwen-agent`, then rerun the
+  HybridAgentLocal import check above.
+- **`tools_registry.json not found`**: use a current clone of this Nex fork;
+  the registry is at `tools/tools_registry.json` and no external copy is
+  required.
+- **`_ARRAY_API not found` or `numpy.core.multiarray`**: the environment has
+  NumPy 2 with NumPy 1-built OpenCV/evaluator wheels. Recreate the venv and
+  install this checkout's `requirements.txt`.
+- **Relax session gets 404/422 from the model endpoint**: check the Relax
+  adapter's `/v1` suffix and do not substitute `NEX_API_BASE` for
+  `RELAX_BASE_URL`.
+
+## 💾 Standard OSWorld installation (non-Relax)
+
+The following upstream-style installation section is for ordinary OSWorld
+evaluation. For Nex + Relax training, follow [Nex + Relax integration](#nex--relax-integration)
+above so that the Nex fork, MCP source, and Relax adapter are configured
+together.
+
 ### VMware/VirtualBox (Desktop, Laptop, Bare Metal Machine)
 Suppose you are operating on a system that has not been virtualized (e.g. your desktop, laptop, bare metal machine), meaning you are not utilizing a virtualized environment like AWS, Azure, or k8s.
 If this is the case, proceed with the instructions below. However, if you are on a virtualized platform, please refer to the [Docker](https://github.com/xlang-ai/OSWorld?tab=readme-ov-file#docker-server-with-kvm-support-for-the-better) section.
 
 1. First, clone this repository and `cd` into it. Then, install the dependencies listed in `requirements.txt`. It is recommended that you use the latest version of Conda to manage the environment, but you can also choose to manually install the dependencies. Please ensure that the version of Python is >= 3.10.
 ```bash
-# Clone the OSWorld repository
-git clone https://github.com/xlang-ai/OSWorld
+# Clone the Nex-enabled OSWorld repository
+git clone https://github.com/fxsc03/OSWorld-main-nex.git OSWorld-main-nex
 
 # Change directory into the cloned repository
-cd OSWorld
+cd OSWorld-main-nex
 
 # Optional: Create a Conda environment for OSWorld
 # conda create -n osworld python=3.10
